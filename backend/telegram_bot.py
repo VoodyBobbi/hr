@@ -21,7 +21,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
-    answer, _ = get_answer(user_message)
+    chat_id = str(update.effective_chat.id)
+
+    answer, _ = get_answer(user_message, source="telegram", external_id=chat_id)
     await update.message.reply_text(answer)
 
 

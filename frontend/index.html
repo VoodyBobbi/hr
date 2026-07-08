@@ -1,130 +1,3 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="UTF-8">
-<title>FAQ-ассистент</title>
-<style>
-  body {
-    font-family: Arial, sans-serif;
-    margin: 0;
-    padding: 40px;
-    min-height: 100vh;
-    background-image:
-      linear-gradient(rgba(245, 245, 245, 0.75), rgba(245, 245, 245, 0.75)),
-      url("background.png");
-    background-size: cover;
-    background-position: center;
-    background-attachment: fixed;
-  }
-
-  #chat-icon {
-    position: fixed;
-    bottom: 24px;
-    right: 24px;
-    width: 60px;
-    height: 60px;
-    border-radius: 50%;
-    background: #2563eb;
-    color: white;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 28px;
-    cursor: pointer;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-    z-index: 1000;
-  }
-
-  #chat-window {
-    position: fixed;
-    bottom: 96px;
-    right: 24px;
-    width: 340px;
-    height: 460px;
-    background: white;
-    border-radius: 12px;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.25);
-    display: none;
-    flex-direction: column;
-    overflow: hidden;
-    z-index: 1000;
-  }
-
-  #chat-header {
-    background: #2563eb;
-    color: white;
-    padding: 12px 16px;
-    font-weight: bold;
-  }
-
-  #chat-messages {
-    flex: 1;
-    padding: 12px;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .msg {
-    max-width: 80%;
-    padding: 8px 12px;
-    border-radius: 10px;
-    font-size: 14px;
-    line-height: 1.4;
-  }
-
-  .msg.user {
-    align-self: flex-end;
-    background: #2563eb;
-    color: white;
-  }
-
-  .msg.bot {
-    align-self: flex-start;
-    background: #f0f0f0;
-    color: #111;
-  }
-
-  #chat-input-area {
-    display: flex;
-    border-top: 1px solid #eee;
-  }
-
-  #chat-input {
-    flex: 1;
-    border: none;
-    padding: 12px;
-    font-size: 14px;
-    outline: none;
-  }
-
-  #chat-send {
-    border: none;
-    background: #2563eb;
-    color: white;
-    padding: 0 16px;
-    cursor: pointer;
-    font-size: 14px;
-  }
-</style>
-</head>
-<body>
-
-<h1>Мой сайт</h1>
-<p>Здесь будет остальной контент страницы.</p>
-
-<div id="chat-icon">💬</div>
-
-<div id="chat-window">
-  <div id="chat-header">Консультант</div>
-  <div id="chat-messages"></div>
-  <div id="chat-input-area">
-    <input id="chat-input" type="text" placeholder="Напишите вопрос...">
-    <button id="chat-send">➤</button>
-  </div>
-</div>
-
 <script>
 const API_URL = "http://localhost:8000/chat";
 
@@ -133,6 +6,15 @@ const chatWindow = document.getElementById("chat-window");
 const messages = document.getElementById("chat-messages");
 const input = document.getElementById("chat-input");
 const sendBtn = document.getElementById("chat-send");
+
+function getSessionId() {
+  let sessionId = localStorage.getItem("faq_session_id");
+  if (!sessionId) {
+    sessionId = crypto.randomUUID();
+    localStorage.setItem("faq_session_id", sessionId);
+  }
+  return sessionId;
+}
 
 icon.addEventListener("click", () => {
   chatWindow.style.display = chatWindow.style.display === "flex" ? "none" : "flex";
@@ -157,9 +39,18 @@ async function sendMessage() {
     const response = await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, top_k: 3 })
+      body: JSON.stringify({
+        message: text,
+        top_k: 3,
+        session_id: getSessionId(),
+      })
     });
     const data = await response.json();
+
+    if (data.session_id) {
+      localStorage.setItem("faq_session_id", data.session_id);
+    }
+
     addMessage(data.answer, "bot");
   } catch (err) {
     addMessage("Ошибка соединения с сервером.", "bot");
@@ -171,6 +62,3 @@ input.addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendMessage();
 });
 </script>
-
-</body>
-</html>

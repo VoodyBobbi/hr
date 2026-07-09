@@ -23,3 +23,5 @@ logs/logs/**/*.csv
 data/conversations/
 
 candidats/candidates.csv
+candidats/candidate_sessions.json
+logs/

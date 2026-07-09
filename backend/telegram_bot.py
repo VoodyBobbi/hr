@@ -23,7 +23,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     chat_id = str(update.effective_chat.id)
 
-    answer, _ = get_answer(user_message, source="telegram", external_id=chat_id)
+    try:
+        answer, _ = get_answer(user_message, source="telegram", external_id=chat_id)
+    except Exception as e:
+        print(f"[telegram_bot] Ошибка: {e}")
+        answer = (
+            "Сейчас нет доступа к серверу ассистента по техническим причинам. "
+            "Пожалуйста, напишите чуть позже."
+        )
+
     await update.message.reply_text(answer)
 
 

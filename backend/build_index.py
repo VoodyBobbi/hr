@@ -85,4 +85,6 @@ def main(force: bool = False):
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    force_rebuild = "--force" in sys.argv
+    main(force=force_rebuild)

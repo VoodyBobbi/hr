@@ -1,0 +1,25 @@
+# Секреты и окружение — САМОЕ ВАЖНОЕ
+.env
+*.env
+!.env.example
+
+# IDE
+.idea/
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Логи и базы SQLite (не хранить в git)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+logs/logs/**/*.csv
+
+# История диалогов
+data/conversations/
+
+candidats/candidates.csv

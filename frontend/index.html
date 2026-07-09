@@ -111,9 +111,18 @@
 </head>
 <body>
 
-<h1>Мой сайт</h1>
-<p>Здесь будет остальной контент страницы.</p>
-
+<h1>Мои проекты</h1>
+<div style="max-width: 600px; background: white; padding: 24px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+  <h2>FAQ-ассистент для HR (ООО «ПОЛАТИ»)</h2>
+  <p>
+    Виртуальный менеджер по подбору персонала на базе RAG-архитектуры:
+    поиск по базе знаний компании (FAISS + sentence-transformers), генерация
+    ответов через GigaChat, память диалога, автоматическое заполнение анкеты
+    кандидата с постепенным сбором данных и учётом 152-ФЗ.
+  </p>
+  <p>Работает как на сайте (виджет справа внизу), так и в Telegram.</p>
+  <p><b>Стек:</b> FastAPI, FAISS, GigaChat API, python-telegram-bot, sentence-transformers</p>
+</div>
 <div id="chat-icon">💬</div>
 
 <div id="chat-window">

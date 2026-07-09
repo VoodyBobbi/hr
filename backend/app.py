@@ -1,17 +1,29 @@
-import uuid
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .assistant import get_answer
 
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
+
 app = FastAPI()
+
+app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+
+
+@app.get("/")
+def read_index():
+    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

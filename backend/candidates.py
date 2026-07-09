@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import threading
 from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
@@ -9,6 +10,8 @@ CANDIDATES_PATH = os.path.join(CANDIDATS_DIR, "candidates.csv")
 SESSIONS_PATH = os.path.join(CANDIDATS_DIR, "candidate_sessions.json")
 
 os.makedirs(CANDIDATS_DIR, exist_ok=True)
+
+_lock = threading.Lock()
 
 FIELD_ORDER = [
     "ID кандидата",
@@ -46,6 +49,14 @@ FIELD_ORDER = [
     "Факт ознакомления с ЗАКОНОМ",
     "Факт ознакомления с готовой карточкой",
 ]
+
+_NORMALIZED_FIELDS = {f.strip().lower().replace("_", " "): f for f in FIELD_ORDER}
+
+
+def normalize_field_name(name: str) -> str | None:
+    """Пытается сопоставить произвольное имя поля (от модели) с реальным полем таблицы."""
+    key = name.strip().lower().replace("_", " ")
+    return _NORMALIZED_FIELDS.get(key)
 
 
 def _load_sessions() -> dict:
@@ -101,43 +112,48 @@ def _save_table(fields: list, candidates: dict):
 
 
 def get_or_create_candidate(source: str, external_id: str) -> str:
-    sessions = _load_sessions()
-    key = f"{source}:{external_id}"
+    with _lock:
+        sessions = _load_sessions()
+        key = f"{source}:{external_id}"
 
-    if key in sessions:
-        return sessions[key]
+        if key in sessions:
+            return sessions[key]
 
-    fields, candidates = _load_table()
-    existing_ids = [int(cid) for cid in candidates.keys()] if candidates else []
-    new_id = str(max(existing_ids) + 1) if existing_ids else "1"
+        fields, candidates = _load_table()
+        existing_ids = [int(cid) for cid in candidates.keys()] if candidates else []
+        new_id = str(max(existing_ids) + 1) if existing_ids else "1"
 
-    candidates[new_id] = {field: "" for field in fields}
-    candidates[new_id]["ID кандидата"] = new_id
-    candidates[new_id]["Источник"] = source
-    candidates[new_id]["ДАТА заполнения"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        candidates[new_id] = {field: "" for field in fields}
+        candidates[new_id]["ID кандидата"] = new_id
+        candidates[new_id]["Источник"] = source
+        candidates[new_id]["ДАТА заполнения"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    _save_table(fields, candidates)
+        _save_table(fields, candidates)
 
-    sessions[key] = new_id
-    _save_sessions(sessions)
+        sessions[key] = new_id
+        _save_sessions(sessions)
 
-    return new_id
+        return new_id
 
 
-def set_field(candidate_id: str, field_name: str, value: str):
-    fields, candidates = _load_table()
-    if field_name not in fields:
-        return
-    if candidate_id not in candidates:
-        return
-    candidates[candidate_id][field_name] = value
-    _save_table(fields, candidates)
+def set_field(candidate_id: str, field_name: str, value: str) -> bool:
+    real_field = normalize_field_name(field_name)
+    if real_field is None:
+        print(f"[candidates] Неизвестное поле от модели: '{field_name}' — игнорирую.")
+        return False
+
+    with _lock:
+        fields, candidates = _load_table()
+        if candidate_id not in candidates:
+            return False
+        candidates[candidate_id][real_field] = value
+        _save_table(fields, candidates)
+        return True
 
 
 def mark_law_acknowledged(candidate_id: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    set_field(candidate_id, "Факт ознакомления с ЗАКОНОМ",
-              f"Согласие получено {timestamp}")
+    set_field(candidate_id, "Факт ознакомления с ЗАКОНОМ", f"Согласие получено {timestamp}")
 
 
 def mark_card_confirmed(candidate_id: str):
@@ -147,5 +163,6 @@ def mark_card_confirmed(candidate_id: str):
 
 
 def get_card(candidate_id: str) -> dict:
-    _, candidates = _load_table()
-    return candidates.get(candidate_id, {})
+    with _lock:
+        _, candidates = _load_table()
+        return candidates.get(candidate_id, {})

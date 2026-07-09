@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import threading
+import time
 from datetime import datetime
 
 import numpy as np
@@ -11,6 +13,7 @@ from sentence_transformers import SentenceTransformer
 
 from .rag_index import load_index, search_similar
 from . import candidates
+from . import logger
 
 load_dotenv()
 
@@ -36,12 +39,15 @@ os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
 
 embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
+_state_lock = threading.RLock()
 _state = {
     "mtimes": {},
     "system_prompt": "",
     "index": None,
     "metadata": None,
 }
+
+_history_lock = threading.Lock()
 
 
 def _get_mtimes() -> dict:
@@ -67,27 +73,33 @@ def _build_system_prompt(agent_prompt: str, knowledge_base: dict) -> str:
     return agent_prompt + knowledge_summary
 
 
-def _reload_all():
+def _reload_all_locked():
     with open(AGENT_PROMPT_PATH, "r", encoding="utf-8") as f:
         agent_prompt = f.read().strip()
 
     with open(KNOWLEDGE_BASE_PATH, "r", encoding="utf-8") as f:
         knowledge_base = json.load(f)
 
-    _state["system_prompt"] = _build_system_prompt(agent_prompt, knowledge_base)
-    _state["index"], _state["metadata"] = load_index(INDEX_PATH, META_PATH)
+    new_system_prompt = _build_system_prompt(agent_prompt, knowledge_base)
+    new_index, new_metadata = load_index(INDEX_PATH, META_PATH)
+
+    _state["system_prompt"] = new_system_prompt
+    _state["index"] = new_index
+    _state["metadata"] = new_metadata
     _state["mtimes"] = _get_mtimes()
 
     print("[assistant] База знаний и промпт (пере)загружены.")
 
 
 def _ensure_fresh():
-    current_mtimes = _get_mtimes()
-    if current_mtimes != _state["mtimes"]:
-        _reload_all()
+    with _state_lock:
+        current_mtimes = _get_mtimes()
+        if current_mtimes != _state["mtimes"]:
+            _reload_all_locked()
 
 
-_reload_all()
+with _state_lock:
+    _reload_all_locked()
 
 
 def embed_text(text: str) -> np.ndarray:
@@ -114,35 +126,55 @@ def _save_history(source: str, external_id: str, history: list):
         json.dump(history, f, ensure_ascii=False, indent=2)
 
 
-MARKER_PATTERN = re.compile(r"###(.+?)###")
+# Ищет строки вида: ##SAVE_FIELD:поле=значение##  или  ###SAVE_FIELD:поле=значение###
+# (терпимо к 2 или 3+ решёткам, к пробелам, к регистру ключевых слов)
+MARKER_LINE_PATTERN = re.compile(
+    r"^\s*#{2,}\s*(SAVE_FIELD\s*:\s*.+?|LAW_ACK|CARD_CONFIRMED)\s*#{0,}\s*$",
+    re.IGNORECASE,
+)
 
 
 def _process_markers(raw_text: str, candidate_id: str) -> str:
-    matches = MARKER_PATTERN.findall(raw_text)
+    """Построчно находит служебные маркеры, выполняет действия, убирает их из текста."""
+    clean_lines = []
 
-    for marker in matches:
-        marker = marker.strip()
-        if marker.startswith("SAVE_FIELD:"):
-            payload = marker[len("SAVE_FIELD:"):]
+    for line in raw_text.split("\n"):
+        match = MARKER_LINE_PATTERN.match(line)
+        if not match:
+            clean_lines.append(line)
+            continue
+
+        marker_body = match.group(1).strip()
+
+        if marker_body.upper().startswith("SAVE_FIELD"):
+            payload = marker_body.split(":", 1)[1] if ":" in marker_body else ""
             if "=" in payload:
                 field_name, value = payload.split("=", 1)
                 candidates.set_field(candidate_id, field_name.strip(), value.strip())
-        elif marker == "LAW_ACK":
+        elif marker_body.upper() == "LAW_ACK":
             candidates.mark_law_acknowledged(candidate_id)
-        elif marker == "CARD_CONFIRMED":
+        elif marker_body.upper() == "CARD_CONFIRMED":
             candidates.mark_card_confirmed(candidate_id)
+        # строка-маркер не добавляется в clean_lines — пользователь её не увидит
 
-    clean_text = MARKER_PATTERN.sub("", raw_text).strip()
-    return clean_text
+    return "\n".join(clean_lines).strip()
 
 
 def _format_candidate_progress(card: dict) -> str:
-    filled = {k: v for k, v in card.items() if v and k not in ("ID кандидата", "Источник")}
+    filled = {
+        k: v for k, v in card.items()
+        if v and k not in ("ID кандидата", "Источник", "ДАТА заполнения")
+    }
     if not filled:
-        return "Анкета ещё не начата — данных нет."
+        return "Анкета этого кандидата ещё не начата."
 
-    lines = [f"- {k}: {v}" for k, v in filled.items()]
-    return "Уже заполнено в анкете этого кандидата:\n" + "\n".join(lines)
+    count = len(filled)
+    return (
+        f"Кандидат уже сообщил {count} пункт(ов) анкеты (используй это только для себя, "
+        f"чтобы не спрашивать повторно; отвечай пользователю простыми словами, БЕЗ технических "
+        f"названий полей и без выгрузки полного списка, если он явно не попросил это): "
+        + ", ".join(filled.keys())
+    )
 
 
 def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3):
@@ -150,22 +182,29 @@ def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3)
     source — "site" или "telegram".
     external_id — стабильный идентификатор диалога (session_id сайта или chat_id Telegram).
     """
+    start_time = time.time()
     _ensure_fresh()
 
     candidate_id = candidates.get_or_create_candidate(source, external_id)
     card = candidates.get_card(candidate_id)
     progress_note = _format_candidate_progress(card)
 
-    history = _load_history(source, external_id)
+    with _history_lock:
+        history = _load_history(source, external_id)
+
+    with _state_lock:
+        current_index = _state["index"]
+        current_metadata = _state["metadata"]
+        current_system_prompt = _state["system_prompt"]
 
     query_vec = embed_text(user_message)
-    similar_items = search_similar(_state["index"], _state["metadata"], query_vec, k=top_k)
+    similar_items = search_similar(current_index, current_metadata, query_vec, k=top_k)
 
     faq_context = "\n\n".join(
         f"Вопрос: {item['question']}\nОтвет: {item['answer']}" for item in similar_items
     )
 
-    messages = [Messages(role=MessagesRole.SYSTEM, content=_state["system_prompt"])]
+    messages = [Messages(role=MessagesRole.SYSTEM, content=current_system_prompt)]
 
     for turn in history:
         messages.append(Messages(role=turn["role"], content=turn["content"]))
@@ -174,22 +213,46 @@ def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3)
         Messages(
             role=MessagesRole.USER,
             content=(
-                f"{progress_note}\n\n"
+                f"[Служебная информация, не для показа пользователю] {progress_note}\n\n"
                 f"Похожие вопросы из FAQ:\n{faq_context}\n\n"
                 f"Вопрос пользователя: {user_message}"
             ),
         )
     )
 
-    with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False) as giga:
-        response = giga.chat(Chat(messages=messages))
+    try:
+        with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False) as giga:
+            response = giga.chat(Chat(messages=messages))
+        raw_answer = response.choices[0].message.content
+        status = "ok"
+        error_comment = ""
+    except Exception as e:
+        raw_answer = (
+            "Сейчас нет доступа к серверу ассистента по техническим причинам. "
+            "Пожалуйста, попробуйте написать чуть позже, либо свяжитесь с менеджером напрямую."
+        )
+        status = "error"
+        error_comment = str(e)
+        print(f"[assistant] Ошибка обращения к GigaChat: {e}")
 
-    raw_answer = response.choices[0].message.content
     clean_answer = _process_markers(raw_answer, candidate_id)
 
     history.append({"role": MessagesRole.USER, "content": user_message})
     history.append({"role": MessagesRole.ASSISTANT, "content": clean_answer})
     history = history[-MAX_HISTORY_MESSAGES:]
-    _save_history(source, external_id, history)
+
+    with _history_lock:
+        _save_history(source, external_id, history)
+
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    logger.log_interaction(
+        source=source,
+        external_id=external_id,
+        query=user_message,
+        response=clean_answer,
+        response_time_ms=elapsed_ms,
+        status=status,
+        comment=error_comment,
+    )
 
     return clean_answer, similar_items

@@ -135,8 +135,18 @@ MARKER_LINE_PATTERN = re.compile(
 
 
 def _process_markers(raw_text: str, candidate_id: str) -> str:
-    """Построчно находит служебные маркеры, выполняет действия, убирает их из текста."""
+    """
+    Построчно находит служебные маркеры, выполняет действия, убирает их из текста.
+
+    ВАЖНО: модель (GigaChat) иногда нарушает собственные инструкции из системного
+    промпта — например, присылает CARD_CONFIRMED раньше времени, когда часть из 29
+    полей анкеты ещё пустая, или пытается сохранить персональные данные до того,
+    как кандидат дал согласие по 152-ФЗ (LAW_ACK). Поэтому здесь добавлена
+    серверная проверка "по факту" (на основе реальных данных в candidates.csv),
+    а не только доверие тексту, который прислала модель.
+    """
     clean_lines = []
+    law_acknowledged = candidates.is_law_acknowledged(candidate_id)
 
     for line in raw_text.split("\n"):
         match = MARKER_LINE_PATTERN.match(line)
@@ -150,11 +160,33 @@ def _process_markers(raw_text: str, candidate_id: str) -> str:
             payload = marker_body.split(":", 1)[1] if ":" in marker_body else ""
             if "=" in payload:
                 field_name, value = payload.split("=", 1)
-                candidates.set_field(candidate_id, field_name.strip(), value.strip())
+                field_name = field_name.strip()
+                real_field = candidates.normalize_field_name(field_name)
+
+                # Жёсткий гейт по 152-ФЗ на уровне кода: пока нет согласия,
+                # разрешено сохранять только "Желаемая должность".
+                if real_field != "Желаемая должность" and not law_acknowledged:
+                    print(
+                        f"[assistant] Заблокировано сохранение поля '{field_name}' "
+                        f"для кандидата {candidate_id}: нет согласия по 152-ФЗ (LAW_ACK)."
+                    )
+                else:
+                    candidates.set_field(candidate_id, field_name, value.strip())
+
         elif marker_body.upper() == "LAW_ACK":
             candidates.mark_law_acknowledged(candidate_id)
+            # со следующей же строки этого ответа разрешаем сохранять остальные поля
+            law_acknowledged = True
+
         elif marker_body.upper() == "CARD_CONFIRMED":
-            candidates.mark_card_confirmed(candidate_id)
+            if candidates.is_card_complete(candidate_id):
+                candidates.mark_card_confirmed(candidate_id)
+            else:
+                missing = candidates.missing_fields(candidate_id)
+                print(
+                    f"[assistant] Заблокировано подтверждение анкеты кандидата {candidate_id}: "
+                    f"не заполнены поля: {', '.join(missing)}."
+                )
         # строка-маркер не добавляется в clean_lines — пользователь её не увидит
 
     return "\n".join(clean_lines).strip()
@@ -255,4 +287,4 @@ def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3)
         comment=error_comment,
     )
 
-    return clean_answer, similar_items
+    return clean_answer, similar_items

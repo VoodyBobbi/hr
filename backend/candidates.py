@@ -52,6 +52,20 @@ FIELD_ORDER = [
 
 _NORMALIZED_FIELDS = {f.strip().lower().replace("_", " "): f for f in FIELD_ORDER}
 
+# Служебные поля, которые не являются "анкетными" данными кандидата —
+# их не нужно требовать при проверке "анкета полностью заполнена".
+_SERVICE_FIELDS = {
+    "ID кандидата",
+    "Источник",
+    "ДАТА заполнения",
+    "Факт ознакомления с ЗАКОНОМ",
+    "Факт ознакомления с готовой карточкой",
+}
+
+# Ровно те 29 полей анкеты, которые модель обязана собрать перед CARD_CONFIRMED
+# (см. системный промпт: "ЖЁСТКИЙ ИНВАРИАНТ" про 29 полей).
+REQUIRED_CANDIDATE_FIELDS = [f for f in FIELD_ORDER if f not in _SERVICE_FIELDS]
+
 
 def normalize_field_name(name: str) -> str | None:
     """Пытается сопоставить произвольное имя поля (от модели) с реальным полем таблицы."""
@@ -166,3 +180,28 @@ def get_card(candidate_id: str) -> dict:
     with _lock:
         _, candidates = _load_table()
         return candidates.get(candidate_id, {})
+
+
+def is_law_acknowledged(candidate_id: str) -> bool:
+    """True, если кандидат уже дал согласие по 152-ФЗ (поле реально заполнено в таблице)."""
+    card = get_card(candidate_id)
+    return bool(card.get("Факт ознакомления с ЗАКОНОМ", "").strip())
+
+
+def is_card_complete(candidate_id: str) -> bool:
+    """
+    Серверная проверка того самого 'ЖЁСТКОГО ИНВАРИАНТА' из системного промпта:
+    все 29 полей анкеты должны быть реально заполнены, прежде чем можно
+    считать анкету готовой к подтверждению (CARD_CONFIRMED).
+
+    Модель может ошибиться и прислать CARD_CONFIRMED раньше времени — этот код
+    не полагается на промпт, а проверяет факты по самой таблице кандидатов.
+    """
+    card = get_card(candidate_id)
+    return all(card.get(field, "").strip() for field in REQUIRED_CANDIDATE_FIELDS)
+
+
+def missing_fields(candidate_id: str) -> list:
+    """Список полей анкеты, которые ещё не заполнены (полезно для логов/отладки)."""
+    card = get_card(candidate_id)
+    return [field for field in REQUIRED_CANDIDATE_FIELDS if not card.get(field, "").strip()]

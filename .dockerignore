@@ -1,0 +1,12 @@
+.env
+*.env
+venv/
+.venv/
+.idea/
+.git/
+__pycache__/
+*.pyc
+candidats/candidates.csv
+candidats/candidate_sessions.json
+logs/
+data/conversations/

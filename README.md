@@ -174,3 +174,13 @@ python run_all.py
 
 FastAPI · Uvicorn · GigaChat · FAISS · sentence-transformers · python-telegram-bot ·
 python-dotenv
+
+---
+title: HR-ассистент ПОЛАТИ
+emoji: 🏗️
+colorFrom: blue
+colorTo: gray
+sdk: docker
+app_port: 7860
+pinned: false
+---

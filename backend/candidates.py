@@ -74,10 +74,14 @@ def normalize_field_name(name: str) -> str | None:
 
 
 def _load_sessions() -> dict:
-    if not os.path.exists(SESSIONS_PATH):
+    if not os.path.exists(SESSIONS_PATH) or os.path.getsize(SESSIONS_PATH) == 0:
         return {}
-    with open(SESSIONS_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(SESSIONS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        print(f"[candidates] {SESSIONS_PATH} повреждён или пуст — начинаю с чистого списка сессий.")
+        return {}
 
 
 def _save_sessions(sessions: dict):

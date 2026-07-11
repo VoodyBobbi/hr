@@ -23,12 +23,20 @@ def search_similar(
     metadata: np.ndarray,
     query_vec: np.ndarray,
     k: int = 3,
+    max_distance: float = 1.0,
 ) -> List[Any]:
+    """
+    max_distance — порог L2-расстояния для эмбеддингов paraphrase-multilingual-MiniLM-L12-v2
+    (нормализованные векторы, L2 в диапазоне ~0..2). Значение 1.0 — стартовая отсечка,
+    НЕ откалибрована на реальных данных проекта — нужно проверить на живых вопросах
+    ("привет", "кто ты?", односложные ответы) и подобрать точнее по логам.
+    Без порога поиск всегда возвращал top_k ближайших даже при нерелевантном запросе,
+    что подмешивало случайный FAQ-контекст в промпт модели.
+    """
     distances, indices = index.search(query_vec, k)
-    idxs = indices[0]
     results = []
-    for i in idxs:
-        if 0 <= i < len(metadata):
+    for dist, i in zip(distances[0], indices[0]):
+        if 0 <= i < len(metadata) and dist <= max_distance:
             results.append(metadata[i])
     return results
 

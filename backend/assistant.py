@@ -126,59 +126,100 @@ def _save_history(source: str, external_id: str, history: list):
         json.dump(history, f, ensure_ascii=False, indent=2)
 
 
-# Ищет строки вида: ##SAVE_FIELD:поле=значение##  или  ###SAVE_FIELD:поле=значение###
-# (терпимо к 2 или 3+ решёткам, к пробелам, к регистру ключевых слов)
-MARKER_LINE_PATTERN = re.compile(
-    r"^\s*#{2,}\s*(SAVE_FIELD\s*:\s*.+?|LAW_ACK|CARD_CONFIRMED)\s*#{0,}\s*$",
+# --- Поиск служебных маркеров ---
+#
+# ВАЖНО: модель НЕ гарантирует, что маркер стоит на отдельной строке — часто
+# лепит его в конец обычной фразы без переноса строки, например:
+#   "Теперь, как ваше имя? ###SAVE_FIELD:Имя"
+# Поэтому маркер ищется ГДЕ УГОДНО в тексте (не только в начале строки).
+#
+# Два паттерна, в порядке применения:
+#
+# 1) CLOSED — маркер с явным закрывающим ###. Значение ограничено [^\n#] —
+#    не выходит за пределы строки и останавливается на первом же ###, поэтому
+#    НЕ поглощает текст, который идёт после маркера в том же сообщении.
+#    Без этого ограничения (просто .+? до конца строки/текста) наблюдался
+#    реальный баг: "###SAVE_FIELD:Имя=Иван### Теперь, скажите..." — модель
+#    закрыла маркер сразу после значения, но старая регулярка всё равно
+#    дотягивалась до конца сообщения и записывала в поле "Иван### Теперь,
+#    скажите, пожалуйста, вашу фамилию?" — а пользователю уходило пустое
+#    сообщение (см. candidates.csv кандидата 2, поле "Имя").
+#
+# 2) OPEN — запасной вариант для маркера БЕЗ закрывающих ### (модель иногда
+#    просто не дописывает закрытие в конце сообщения). Съедает до конца
+#    СТРОКИ (\n или конец текста), но не дальше — не может поглотить
+#    следующий абзац, если он есть.
+CLOSED_MARKER_PATTERN = re.compile(
+    r"#{2,}\s*(SAVE_FIELD\s*:\s*[^\n#]+?|LAW_ACK|CARD_CONFIRMED)\s*#{2,}",
     re.IGNORECASE,
 )
+OPEN_MARKER_PATTERN = re.compile(
+    r"#{2,}\s*(SAVE_FIELD\s*:\s*[^\n#]+|LAW_ACK|CARD_CONFIRMED)\s*#{0,}\s*(?=\n|$)",
+    re.IGNORECASE,
+)
+
+# Модель иногда (по привычке из markdown) оборачивает маркер в тройные кавычки
+# ```...```, хотя промпт этого не просит. Сам маркер вырезается по паттернам
+# выше, а после этого от него может остаться пустая пара ```\n```. Эта
+# регулярка вырезает ТОЛЬКО пустые/пробельные fence-пары — легитимные code
+# block с реальным содержимым внутри не трогает.
+EMPTY_FENCE_PATTERN = re.compile(r"```\w*[ \t]*\n?\s*```")
 
 
 def _process_markers(raw_text: str, candidate_id: str) -> str:
     """
-    Построчно находит служебные маркеры, выполняет действия, убирает их из текста.
+    Находит служебные маркеры в тексте (в любом месте, не только на отдельной
+    строке), выполняет действия, убирает их из текста, который увидит кандидат.
 
     ВАЖНО: модель (GigaChat) иногда нарушает собственные инструкции из системного
     промпта — например, присылает CARD_CONFIRMED раньше времени, когда часть из 29
-    полей анкеты ещё пустая, или пытается сохранить персональные данные до того,
-    как кандидат дал согласие по 152-ФЗ (LAW_ACK). Поэтому здесь добавлена
-    серверная проверка "по факту" (на основе реальных данных в candidates.csv),
-    а не только доверие тексту, который прислала модель.
+    полей анкеты ещё пустая, пытается сохранить персональные данные до того,
+    как кандидат дал согласие по 152-ФЗ (LAW_ACK), или путает синтаксис и пишет
+    "SAVE_FIELD:LAW_ACK" вместо отдельного "LAW_ACK" (нормализуется ниже).
+    Поэтому здесь добавлена серверная проверка "по факту" (на основе реальных
+    данных в candidates.csv), а не только доверие тексту, который прислала модель.
     """
-    clean_lines = []
     law_acknowledged = candidates.is_law_acknowledged(candidate_id)
 
-    for line in raw_text.split("\n"):
-        match = MARKER_LINE_PATTERN.match(line)
-        if not match:
-            clean_lines.append(line)
-            continue
+    def handle_marker(marker_body: str) -> str:
+        nonlocal law_acknowledged
+        body = marker_body.strip()
 
-        marker_body = match.group(1).strip()
+        if body.upper().startswith("SAVE_FIELD"):
+            payload = body.split(":", 1)[1].strip() if ":" in body else ""
 
-        if marker_body.upper().startswith("SAVE_FIELD"):
-            payload = marker_body.split(":", 1)[1] if ":" in marker_body else ""
-            if "=" in payload:
-                field_name, value = payload.split("=", 1)
-                field_name = field_name.strip()
-                real_field = candidates.normalize_field_name(field_name)
+            # Защита от путаницы модели: "###SAVE_FIELD:LAW_ACK###" вместо
+            # отдельного "###LAW_ACK###" — наблюдалось в реальных логах.
+            if payload.upper() == "LAW_ACK":
+                candidates.mark_law_acknowledged(candidate_id)
+                law_acknowledged = True
+                return ""
 
-                # Жёсткий гейт по 152-ФЗ на уровне кода: пока нет согласия,
-                # разрешено сохранять только "Желаемая должность".
-                if real_field != "Желаемая должность" and not law_acknowledged:
-                    print(
-                        f"[assistant] Заблокировано сохранение поля '{field_name}' "
-                        f"для кандидата {candidate_id}: нет согласия по 152-ФЗ (LAW_ACK)."
-                    )
-                else:
-                    candidates.set_field(candidate_id, field_name, value.strip())
+            if "=" not in payload:
+                # Маркер без "=значение" (например модель проставила его ДО
+                # ответа кандидата, просто пометив имя поля) — сохранять
+                # нечего, просто убираем мусор из текста.
+                return ""
 
-        elif marker_body.upper() == "LAW_ACK":
+            field_name, value = payload.split("=", 1)
+            field_name = field_name.strip()
+            real_field = candidates.normalize_field_name(field_name)
+
+            # Жёсткий гейт по 152-ФЗ на уровне кода: пока нет согласия,
+            # разрешено сохранять только "Желаемая должность".
+            if real_field != "Желаемая должность" and not law_acknowledged:
+                print(
+                    f"[assistant] Заблокировано сохранение поля '{field_name}' "
+                    f"для кандидата {candidate_id}: нет согласия по 152-ФЗ (LAW_ACK)."
+                )
+            else:
+                candidates.set_field(candidate_id, field_name, value.strip())
+
+        elif body.upper() == "LAW_ACK":
             candidates.mark_law_acknowledged(candidate_id)
-            # со следующей же строки этого ответа разрешаем сохранять остальные поля
             law_acknowledged = True
 
-        elif marker_body.upper() == "CARD_CONFIRMED":
+        elif body.upper() == "CARD_CONFIRMED":
             if candidates.is_card_complete(candidate_id):
                 candidates.mark_card_confirmed(candidate_id)
             else:
@@ -187,9 +228,28 @@ def _process_markers(raw_text: str, candidate_id: str) -> str:
                     f"[assistant] Заблокировано подтверждение анкеты кандидата {candidate_id}: "
                     f"не заполнены поля: {', '.join(missing)}."
                 )
-        # строка-маркер не добавляется в clean_lines — пользователь её не увидит
 
-    return "\n".join(clean_lines).strip()
+        return ""
+
+    text = CLOSED_MARKER_PATTERN.sub(lambda m: handle_marker(m.group(1)), raw_text)
+    text = OPEN_MARKER_PATTERN.sub(lambda m: handle_marker(m.group(1)), text)
+    text = EMPTY_FENCE_PATTERN.sub("", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)  # схлопываем пустые строки, оставшиеся от вырезанных маркеров
+
+    clean_text = text.strip()
+
+    if not clean_text:
+        # Модель прислала ответ, состоящий ТОЛЬКО из маркера(ов), без единого
+        # слова для кандидата. Это баг промпта (см. системный промпт — модель
+        # обязана сопровождать каждый маркер текстом), не маскируем его
+        # красивой заглушкой, а громко логируем, чтобы это было видно в
+        # logs.csv (колонка "Комментарий") и не потерялось молча, как раньше.
+        print(
+            f"[assistant] ВНИМАНИЕ: ответ модели кандидату {candidate_id} стал пустым "
+            f"после зачистки маркеров. Сырой ответ модели: {raw_text!r}"
+        )
+
+    return clean_text
 
 
 def _format_candidate_progress(card: dict) -> str:

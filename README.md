@@ -1,4 +1,14 @@
+---
+title: HR-ассистент ПОЛАТИ
+emoji: 🏗️
+colorFrom: blue
+colorTo: gray
+sdk: docker
+app_port: 7860
+pinned: false
+---
 # HR-ассистент ООО ПОЛАТИ
+
 
 Вопросно-ответный AI-ассистент (HR-менеджер по подбору персонала) для строительной компании
 ПОЛАТИ. Отвечает кандидатам на вопросы по вакансиям и условиям работы строго на основе базы
@@ -175,12 +185,4 @@ python run_all.py
 FastAPI · Uvicorn · GigaChat · FAISS · sentence-transformers · python-telegram-bot ·
 python-dotenv
 
----
-title: HR-ассистент ПОЛАТИ
-emoji: 🏗️
-colorFrom: blue
-colorTo: gray
-sdk: docker
-app_port: 7860
-pinned: false
----
+

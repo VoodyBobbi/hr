@@ -1,0 +1,19 @@
+# Локальный запуск (не Render, не облако). Данные (анкеты, история переписки,
+# логи) лежат в папке ./hr-data на этом компьютере — рядом с docker-compose.yml,
+# но НЕ внутри репозитория с кодом (см. .gitignore). Замените "./hr-data" на
+# любой другой путь на диске администратора, если нужно хранить данные не
+# рядом с кодом, а в отдельном месте — например "/home/admin/hr-data" или
+# "C:/HR-Data" на Windows (Docker Desktop понимает такие пути).
+services:
+  hr-assistant:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PORT=8000
+      - HR_DATA_DIR=/data
+    volumes:
+      - ./hr-data:/data
+    restart: unless-stopped

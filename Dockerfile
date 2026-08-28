@@ -13,5 +13,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN chmod +x start.sh
 
-# Render сам передаёт порт через переменную окружения PORT — не хардкодим порт здесь.
+# Порт настраивается переменной окружения PORT (по умолчанию 8000) — см. start.sh.
 CMD ["./start.sh"]

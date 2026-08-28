@@ -3,11 +3,13 @@ import os
 import threading
 from datetime import datetime
 
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-LOGS_DIR = os.path.join(BASE_DIR, "logs")
-LOG_PATH = os.path.join(LOGS_DIR, "logs.csv")
+from . import paths
 
-os.makedirs(LOGS_DIR, exist_ok=True)
+# Логи хранятся ПОЛНОСТЬЮ и как раньше — без маскирования ПД, без ротации,
+# без срока хранения (решение: логи и историю не трогать). Единственное
+# изменение — папка теперь вне репозитория (см. backend/paths.py).
+LOGS_DIR = paths.LOGS_DIR
+LOG_PATH = os.path.join(LOGS_DIR, "logs.csv")
 
 _lock = threading.Lock()
 

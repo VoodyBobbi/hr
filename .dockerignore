@@ -6,7 +6,9 @@ venv/
 .git/
 __pycache__/
 *.pyc
-candidats/candidates.csv
-candidats/candidate_sessions.json
-logs/
+
+# Персональные данные — вне образа (см. backend/paths.py и .gitignore)
+hr-data/
+candidats/
 data/conversations/
+logs/

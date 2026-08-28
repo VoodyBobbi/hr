@@ -14,6 +14,8 @@ from sentence_transformers import SentenceTransformer
 from .rag_index import load_index, search_similar
 from . import candidates
 from . import logger
+from . import paths
+from .validators import FieldValidationError
 
 load_dotenv()
 
@@ -27,15 +29,17 @@ INDEX_PATH = os.path.join(DATA_DIR, "faiss_index.bin")
 META_PATH = os.path.join(DATA_DIR, "faqs_metadata.npy")
 AGENT_PROMPT_PATH = os.path.join(DATA_DIR, "system_prompt.md")
 KNOWLEDGE_BASE_PATH = os.path.join(DATA_DIR, "knowledge_base.json")
-CONVERSATIONS_DIR = os.path.join(DATA_DIR, "conversations")
+
+# История переписки — персональные данные кандидата, поэтому лежит ВНЕ
+# репозитория (папка на диске администратора, см. backend/paths.py), в
+# отличие от базы знаний бота выше (FAQ/промпт — это конфигурация, не ПД).
+CONVERSATIONS_DIR = paths.CONVERSATIONS_DIR
 
 EMBEDDING_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 
 WATCHED_FILES = [AGENT_PROMPT_PATH, KNOWLEDGE_BASE_PATH, INDEX_PATH, META_PATH]
 
 MAX_HISTORY_MESSAGES = 20
-
-os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
 
 embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
@@ -107,13 +111,8 @@ def embed_text(text: str) -> np.ndarray:
     return vector.astype("float32")
 
 
-def _conversation_path(source: str, external_id: str) -> str:
-    safe_id = "".join(c if c.isalnum() else "_" for c in str(external_id))
-    return os.path.join(CONVERSATIONS_DIR, f"{source}_{safe_id}.json")
-
-
 def _load_history(source: str, external_id: str) -> list:
-    path = _conversation_path(source, external_id)
+    path = paths.conversation_path(source, external_id)
     if not os.path.exists(path):
         return []
     with open(path, "r", encoding="utf-8") as f:
@@ -121,7 +120,7 @@ def _load_history(source: str, external_id: str) -> list:
 
 
 def _save_history(source: str, external_id: str, history: list):
-    path = _conversation_path(source, external_id)
+    path = paths.conversation_path(source, external_id)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
 
@@ -180,6 +179,7 @@ def _process_markers(raw_text: str, candidate_id: str) -> str:
     данных в candidates.csv), а не только доверие тексту, который прислала модель.
     """
     law_acknowledged = candidates.is_law_acknowledged(candidate_id)
+    validation_errors = []  # [(поле, сообщение), ...] — для короткой пометки кандидату в конце ответа
 
     def handle_marker(marker_body: str) -> str:
         nonlocal law_acknowledged
@@ -213,7 +213,17 @@ def _process_markers(raw_text: str, candidate_id: str) -> str:
                     f"для кандидата {candidate_id}: нет согласия по 152-ФЗ (LAW_ACK)."
                 )
             else:
-                candidates.set_field(candidate_id, field_name, value.strip())
+                try:
+                    candidates.set_field(candidate_id, field_name, value.strip())
+                except FieldValidationError as e:
+                    print(
+                        f"[assistant] Значение поля '{field_name}' для кандидата {candidate_id} "
+                        f"не прошло проверку формата: {e.message} (получено: {value.strip()!r})"
+                    )
+                    # real_field гарантированно не None здесь: FieldValidationError
+                    # бросается только для распознанных полей (см. candidates.set_field) —
+                    # неизвестное имя поля отсекается раньше и без исключения.
+                    validation_errors.append((real_field, e.message))
 
         elif body.upper() == "LAW_ACK":
             candidates.mark_law_acknowledged(candidate_id)
@@ -248,6 +258,13 @@ def _process_markers(raw_text: str, candidate_id: str) -> str:
             f"[assistant] ВНИМАНИЕ: ответ модели кандидату {candidate_id} стал пустым "
             f"после зачистки маркеров. Сырой ответ модели: {raw_text!r}"
         )
+
+    if validation_errors:
+        # Значение не прошло проверку формата и НЕ было сохранено (см. handle_marker
+        # выше) — кандидат должен об этом узнать, а не просто увидеть, что бот
+        # промолчал про это поле и пошёл дальше.
+        notes = " ".join(f"«{field}» — {message}" for field, message in validation_errors)
+        clean_text = (clean_text + "\n\n" if clean_text else "") + f"Уточните, пожалуйста: {notes}"
 
     return clean_text
 

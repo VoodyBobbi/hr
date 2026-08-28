@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-PORT="${PORT:-10000}"
+PORT="${PORT:-8000}"
 
 # Telegram-бот — опциональный канал. Если секрет TELEGRAM_BOT_TOKEN не задан
 # в Environment Variables сервиса, просто пропускаем запуск бота (сайт работает как обычно).

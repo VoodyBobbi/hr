@@ -2,7 +2,6 @@
 .env
 *.env
 
-
 # IDE
 .idea/
 .venv/
@@ -17,11 +16,12 @@ __pycache__/
 *.db-wal
 *.db-shm
 *.sqlite3
-logs/logs/**/*.csv
 
-# История диалогов
+# Персональные данные (анкеты, история переписки, логи) по умолчанию хранятся
+# ВНЕ репозитория (~/hr-data или путь из HR_DATA_DIR — см. backend/paths.py).
+# Правила ниже — подстраховка на случай локального запуска docker-compose
+# (создаёт ./hr-data рядом с кодом) или старых рабочих копий репозитория.
+hr-data/
+candidats/
 data/conversations/
-
-candidats/candidates.csv
-candidats/candidate_sessions.json
 logs/

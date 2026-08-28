@@ -1,15 +1,17 @@
 import csv
+import io
 import json
 import os
 import threading
 from datetime import datetime
 
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-CANDIDATS_DIR = os.path.join(BASE_DIR, "candidats")
+from . import paths
+from .crypto_utils import decrypt_bytes, encrypt_bytes
+from .validators import FieldValidationError, validate_field
+
+CANDIDATS_DIR = paths.CANDIDATS_DIR
 CANDIDATES_PATH = os.path.join(CANDIDATS_DIR, "candidates.csv")
 SESSIONS_PATH = os.path.join(CANDIDATS_DIR, "candidate_sessions.json")
-
-os.makedirs(CANDIDATS_DIR, exist_ok=True)
 
 _lock = threading.Lock()
 
@@ -63,7 +65,8 @@ _SERVICE_FIELDS = {
 }
 
 # Ровно те 29 полей анкеты, которые модель обязана собрать перед CARD_CONFIRMED
-# (см. системный промпт: "ЖЁСТКИЙ ИНВАРИАНТ" про 29 полей).
+# (см. системный промпт: "ЖЁСТКИЙ ИНВАРИАНТ" про 29 полей). Список полей
+# сознательно не сокращается (решение: собирать все 29 полей в чат-боте).
 REQUIRED_CANDIDATE_FIELDS = [f for f in FIELD_ORDER if f not in _SERVICE_FIELDS]
 
 
@@ -90,11 +93,19 @@ def _save_sessions(sessions: dict):
 
 
 def _load_table():
+    """Читает candidates.csv с диска. Файл на диске хранится зашифрованным
+    (Fernet) — здесь он расшифровывается в память и разбирается как CSV."""
     if not os.path.exists(CANDIDATES_PATH):
         return list(FIELD_ORDER), {}
 
-    with open(CANDIDATES_PATH, "r", encoding="utf-8-sig", newline="") as f:
-        rows = list(csv.reader(f))
+    with open(CANDIDATES_PATH, "rb") as f:
+        ciphertext = f.read()
+
+    if not ciphertext:
+        return list(FIELD_ORDER), {}
+
+    plaintext = decrypt_bytes(ciphertext).decode("utf-8-sig")
+    rows = list(csv.reader(io.StringIO(plaintext)))
 
     if not rows:
         return list(FIELD_ORDER), {}
@@ -117,16 +128,26 @@ def _load_table():
 
 
 def _save_table(fields: list, candidates: dict):
+    """Сериализует таблицу в CSV в памяти, шифрует и пишет на диск —
+    на диске никогда не оказывается незашифрованный CSV."""
     candidate_ids = sorted(candidates.keys(), key=lambda x: int(x))
 
-    with open(CANDIDATES_PATH, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Поле"] + candidate_ids)
-        for field in fields:
-            row = [field]
-            for cid in candidate_ids:
-                row.append(candidates[cid].get(field, ""))
-            writer.writerow(row)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["Поле"] + candidate_ids)
+    for field in fields:
+        row = [field]
+        for cid in candidate_ids:
+            row.append(candidates[cid].get(field, ""))
+        writer.writerow(row)
+
+    plaintext = ("\ufeff" + buffer.getvalue()).encode("utf-8")
+    ciphertext = encrypt_bytes(plaintext)
+
+    tmp_path = CANDIDATES_PATH + ".tmp"
+    with open(tmp_path, "wb") as f:
+        f.write(ciphertext)
+    os.replace(tmp_path, CANDIDATES_PATH)  # атомарная замена — не оставит файл в битом состоянии при сбое
 
 
 def get_or_create_candidate(source: str, external_id: str) -> str:
@@ -155,10 +176,20 @@ def get_or_create_candidate(source: str, external_id: str) -> str:
 
 
 def set_field(candidate_id: str, field_name: str, value: str) -> bool:
+    """Сохраняет значение поля после валидации формата.
+
+    Бросает FieldValidationError, если значение не проходит проверку формата
+    (вызывающий код — assistant._process_markers — ловит её и мягко просит
+    кандидата уточнить значение, ничего не сохраняя)."""
     real_field = normalize_field_name(field_name)
     if real_field is None:
         print(f"[candidates] Неизвестное поле от модели: '{field_name}' — игнорирую.")
         return False
+
+    # Служебные поля (ID/источник/дата/отметки согласия) заполняются самим
+    # кодом, а не значениями от модели/кандидата — валидация к ним не нужна.
+    if real_field not in _SERVICE_FIELDS:
+        value = validate_field(real_field, value)
 
     with _lock:
         fields, candidates = _load_table()
@@ -208,4 +239,44 @@ def is_card_complete(candidate_id: str) -> bool:
 def missing_fields(candidate_id: str) -> list:
     """Список полей анкеты, которые ещё не заполнены (полезно для логов/отладки)."""
     card = get_card(candidate_id)
-    return [field for field in REQUIRED_CANDIDATE_FIELDS if not card.get(field, "").strip()]
+    return [field for field in REQUIRED_CANDIDATE_FIELDS if not card.get(field, "").strip()]
+
+
+def delete_candidate(candidate_id: str) -> dict:
+    """Полное удаление данных кандидата по его запросу (право на удаление, 152-ФЗ).
+
+    Удаляет: строку кандидата из candidates.csv, его запись(и) в
+    candidate_sessions.json (маппинг source:external_id -> candidate_id) и
+    файл(ы) истории переписки data*/conversations соответствующие найденным
+    сессиям этого кандидата.
+
+    Возвращает словарь с тем, что реально было удалено — полезно для лога/ответа HR.
+    """
+    with _lock:
+        fields, candidates = _load_table()
+        existed_in_table = candidate_id in candidates
+        if existed_in_table:
+            del candidates[candidate_id]
+            _save_table(fields, candidates)
+
+        sessions = _load_sessions()
+        removed_sessions = [key for key, cid in sessions.items() if cid == candidate_id]
+        for key in removed_sessions:
+            del sessions[key]
+        if removed_sessions:
+            _save_sessions(sessions)
+
+    removed_conversations = []
+    for key in removed_sessions:
+        source, _, external_id = key.partition(":")
+        conv_path = paths.conversation_path(source, external_id)
+        if os.path.exists(conv_path):
+            os.remove(conv_path)
+            removed_conversations.append(conv_path)
+
+    return {
+        "candidate_id": candidate_id,
+        "removed_from_table": existed_in_table,
+        "removed_sessions": removed_sessions,
+        "removed_conversations": removed_conversations,
+    }

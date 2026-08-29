@@ -23,6 +23,16 @@ GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS")
 if not GIGACHAT_CREDENTIALS:
     raise RuntimeError("GIGACHAT_CREDENTIALS is not set. Please set it in your .env file.")
 
+# Модель GigaChat, которой будет пользоваться ассистент.
+# Идентификаторы модели в API (см. developers.sber.ru/docs/ru/gigachat/guides/selecting-a-model):
+#   GigaChat-2        — Lite, самая простая и дешёвая (по умолчанию)
+#   GigaChat-2-Pro    — Pro
+#   GigaChat-2-Max    — Max
+#   GigaChat-3-Ultra  — Ultra (freemium для физлиц)
+# Берём Lite по умолчанию, чтобы минимизировать расход токенов/стоимость.
+# Можно переопределить через .env (GIGACHAT_MODEL=GigaChat-2-Max и т.д.).
+GIGACHAT_MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat-2")
+
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 INDEX_PATH = os.path.join(DATA_DIR, "faiss_index.bin")
@@ -330,8 +340,8 @@ def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3)
     )
 
     try:
-        with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False) as giga:
-            response = giga.chat(Chat(messages=messages))
+        with GigaChat(credentials=GIGACHAT_CREDENTIALS, model=GIGACHAT_MODEL, verify_ssl_certs=False) as giga:
+            response = giga.chat(Chat(messages=messages, model=GIGACHAT_MODEL))
         raw_answer = response.choices[0].message.content
         status = "ok"
         error_comment = ""

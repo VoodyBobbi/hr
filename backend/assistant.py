@@ -7,6 +7,7 @@ from datetime import datetime
 
 import numpy as np
 from dotenv import load_dotenv
+import gigachat.context
 from gigachat import GigaChat
 from gigachat.exceptions import (
     AuthenticationError,
@@ -468,11 +469,37 @@ def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3)
     )
 
     try:
+        # X-Session-ID включает кеширование на стороне GigaChat: если контекст
+        # (системный промпт + предыдущие сообщения) частично совпадает с
+        # прошлым запросом под тем же идентификатором, GigaChat не пересчитывает
+        # эту часть заново — платится и считается только то, что реально
+        # изменилось (см. https://developers.sber.ru/docs/ru/gigachat/guides/keeping-context,
+        # раздел "Кэширование запросов"; ответ API возвращает точное число
+        # закешированных токенов в поле precached_prompt_tokens).
+        #
+        # Используем candidate_id, а не session_id/chat_id: candidate_id
+        # одинаково устроен для обоих каналов (веб и Telegram) и стабилен на
+        # весь диалог одного кандидата — ровно то, что нужно кешу, чтобы
+        # находить совпадение между последовательными сообщениями одного и
+        # того же разговора.
+        #
+        # Экономия не гарантирована на 100% каждый запрос — зависит от того,
+        # сколько контекста реально совпало с предыдущим (system-часть внутри
+        # одного диалога не меняется между сообщениями кандидата, значит по
+        # документации должна кешироваться), и от TTL кеша на стороне
+        # GigaChat, который в документации явно не указан числом.
+        gigachat.context.session_id_cvar.set(candidate_id)
+
         with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False) as giga:
             response = giga.chat(Chat(messages=messages))
         raw_answer = response.choices[0].message.content
         status = "ok"
         error_comment = ""
+
+        precached = getattr(response, "usage", None)
+        precached_tokens = getattr(precached, "precached_prompt_tokens", None) if precached else None
+        if precached_tokens:
+            print(f"[assistant] GigaChat: {precached_tokens} токенов взято из кеша (не тарифицировано).")
     except Exception as e:
         # ВАЖНО: кандидат НИКОГДА не должен увидеть, что что-то сломалось —
         # ни слов "ошибка", ни "API", ни "лимит", ни любого другого признака

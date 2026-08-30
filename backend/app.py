@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -93,7 +93,13 @@ def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 
 
 class ChatRequest(BaseModel):
-    message: str
+    # max_length ограничивает одно сообщение — не количество запросов в минуту
+    # (это делает rate limit выше), а размер ОДНОГО сообщения. Без этого
+    # ничего не мешает прислать один запрос на 100 000 символов — это тоже
+    # расходует токены GigaChat и замедляет ответ, даже если запросов мало.
+    # 2000 символов — с запасом на длинный вопрос от кандидата, но отсекает
+    # явно неразумный ввод (вставленный документ целиком, спам-атаку).
+    message: str = Field(..., min_length=1, max_length=2000)
     top_k: int = 3
     session_id: str | None = None
 

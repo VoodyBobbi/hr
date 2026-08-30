@@ -26,10 +26,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         answer, _ = get_answer(user_message, source="telegram", external_id=chat_id)
     except Exception as e:
-        print(f"[telegram_bot] Ошибка: {e}")
+        # Сюда попадают только сбои ДО обращения к GigaChat (например, не
+        # прочитался файл базы знаний) — сама ошибка GigaChat уже обработана
+        # без единого технического слова внутри get_answer() (см. assistant.py).
+        # Кандидат по-прежнему не должен видеть, что что-то сломалось.
+        print(f"[telegram_bot] Непредвиденная ошибка до обращения к GigaChat: {e}")
         answer = (
-            "Сейчас нет доступа к серверу ассистента по техническим причинам. "
-            "Пожалуйста, напишите чуть позже."
+            "Пока не могу сформулировать точный ответ на этот вопрос. "
+            "Уточните, пожалуйста, что именно вас интересует, либо "
+            "свяжитесь с менеджером напрямую."
         )
 
     await update.message.reply_text(answer)

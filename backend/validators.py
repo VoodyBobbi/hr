@@ -36,8 +36,15 @@ def _require_nonempty(value: str, field_name: str, max_len: int = _MAX_TEXT_LEN)
     return v
 
 
+# Максимальная длина для ФИО-подобных полей. 40 символов с запасом хватает
+# на самые длинные реальные русские отчества/фамилии (например
+# "Александрович" — 13 букв), но уже отсекает совсем неправдоподобные
+# значения (мягкое, не жёсткое ограничение — см. заголовок файла).
+_MAX_NAME_LEN = 40
+
+
 def _validate_name_part(value: str, field_name: str) -> str:
-    v = _require_nonempty(value, field_name, _MAX_SHORT_LEN)
+    v = _require_nonempty(value, field_name, _MAX_NAME_LEN)
     if not re.fullmatch(r"[А-ЯЁа-яёA-Za-z\-\s']+", v):
         raise FieldValidationError(field_name, "допустимы только буквы, дефис и пробел.")
     return v

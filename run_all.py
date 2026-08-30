@@ -1,7 +1,33 @@
+"""
+Единая точка запуска всего проекта одной командой:
+
+    python run_all.py
+
+Что происходит по порядку, автоматически, без отдельных ручных шагов:
+1. Пересборка FAISS-индекса (backend.build_index) — если data/faqs.json не
+   менялся с прошлого запуска, пересборка пропускается (см. build_index.py,
+   сравнение по хешу файла); если менялся — пересобирается автоматически.
+2. Очистка старых строк логов (backend.logger.purge_old_logs) — по сроку
+   хранения LOGS_RETENTION_DAYS из .env.
+3. Запуск сайта (uvicorn) и Telegram-бота как двух процессов.
+
+Папки для персональных данных (candidats/conversations/logs в HR_DATA_DIR,
+см. backend/paths.py) создаются автоматически при первом импорте backend —
+отдельно создавать их вручную не нужно.
+"""
 import subprocess
 import sys
 
+
 def main():
+    print("Проверяю актуальность поискового индекса...")
+    from backend import build_index
+    build_index.main()
+
+    print("Проверяю срок хранения логов...")
+    from backend import logger
+    logger.purge_old_logs()
+
     processes = []
 
     server_process = subprocess.Popen([

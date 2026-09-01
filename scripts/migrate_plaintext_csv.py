@@ -2,7 +2,9 @@
 Разовая миграция: если где-то уже накопился СТАРЫЙ незашифрованный
 candidates.csv (например, скачан с прежнего сервера до перехода на локальный
 запуск) — эта команда зашифрует его и положит в новое хранилище
-(HR_DATA_DIR/candidats/candidates.csv), откуда его будет читать основной код.
+(по умолчанию HR/candidates/candidates.csv внутри папки проекта, либо
+HR_DATA_DIR/candidates/candidates.csv, если задан свой путь), откуда его
+будет читать основной код.
 
 Запуск из корня проекта (нужен настроенный .env с ENCRYPTION_KEY):
     python -m scripts.migrate_plaintext_csv путь/к/старому/candidates.csv

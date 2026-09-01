@@ -10,8 +10,8 @@ ID кандидата — это номер колонки в candidates.csv (п
 работы с ботом, либо явно из кода (candidates.get_card).
 
 Стирает безвозвратно:
-  - строку этого кандидата в candidats/candidates.csv;
-  - его запись(и) в candidats/candidate_sessions.json (привязку сессии к ID);
+  - строку этого кандидата в HR/candidates/candidates.csv;
+  - его запись(и) в HR/candidates/candidate_sessions.json (привязку сессии к ID);
   - файл(ы) истории переписки в папке conversations.
 
 НЕ трогает logs/logs.csv — решение: логи хранить полностью, без изменений.

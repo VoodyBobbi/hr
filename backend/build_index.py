@@ -7,7 +7,7 @@ import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-from .rag_index import load_faq_data
+from .rag_index import load_faq_data, write_index
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -189,7 +189,7 @@ def main(force: bool = False):
     index.add(embeddings)
 
     os.makedirs(os.path.dirname(INDEX_PATH), exist_ok=True)
-    faiss.write_index(index, INDEX_PATH)
+    write_index(index, INDEX_PATH)
 
     meta = np.array(
         [

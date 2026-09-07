@@ -7,6 +7,7 @@ import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
+from .kb_chunker import load_and_chunk as chunk_knowledge_base
 from .rag_index import load_faq_data, write_index
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
@@ -16,29 +17,47 @@ INDEX_PATH = os.path.join(DATA_DIR, "faiss_index.bin")
 META_PATH = os.path.join(DATA_DIR, "faqs_metadata.npy")
 HASH_PATH = os.path.join(DATA_DIR, "data_hash.txt")
 
+# Отдельный, второй индекс для knowledge_base.json — см. подробное
+# объяснение в backend/assistant.py (комментарий у KB_INDEX_PATH) и
+# backend/kb_chunker.py про то, почему раздельно от FAQ-индекса выше, а не
+# в одном общем top-3.
+KB_DATA_PATH = os.path.join(DATA_DIR, "knowledge_base.json")
+KB_INDEX_PATH = os.path.join(DATA_DIR, "kb_faiss_index.bin")
+KB_META_PATH = os.path.join(DATA_DIR, "kb_metadata.npy")
+KB_HASH_PATH = os.path.join(DATA_DIR, "kb_data_hash.txt")
+
 EMBEDDING_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 
-# Файлы в data/, которые НЕ являются источником вопросов-ответов для этого
-# индекса и поэтому исключены из отслеживания ниже:
-#   - faiss_index.bin, faqs_metadata.npy, data_hash.txt, faqs_hash.txt —
-#     сами артефакты сборки. Если их не исключить, пересборка меняла бы их
-#     же, и при следующем запуске хеш "изменился" бы сам по себе — вечная
-#     пересборка на каждом старте.
-#   - system_prompt.md, knowledge_base.json — у них УЖЕ ЕСТЬ отдельный
-#     механизм отслеживания: assistant.py:_ensure_fresh() подхватывает их
-#     на лету по mtime, БЕЗ пересборки векторного индекса (см. README,
-#     раздел "Обновление базы знаний"). Если включить их сюда тоже, каждое
-#     изменение системного промпта запускало бы дорогую пересборку
-#     эмбеддингов, хотя в этом нет необходимости — эти два файла не
-#     используются для векторного поиска, только как текст, который
-#     целиком идёт в системный промпт.
+# Файлы в data/, которые НЕ являются источником вопросов-ответов для FAQ-
+# индекса и поэтому исключены из отслеживания FAQ-индекса ниже:
+#   - faiss_index.bin, faqs_metadata.npy, data_hash.txt, faqs_hash.txt,
+#     kb_faiss_index.bin, kb_metadata.npy, kb_data_hash.txt — сами
+#     артефакты сборки (обоих индексов). Если их не исключить, пересборка
+#     меняла бы их же, и при следующем запуске хеш "изменился" бы сам по
+#     себе — вечная пересборка на каждом старте.
+#   - knowledge_base.json — теперь отслеживается ОТДЕЛЬНО, для своего
+#     собственного KB-индекса (см. build_kb_index ниже), а не игнорируется
+#     полностью, как было раньше (до разбивки на чанки): раньше он целиком
+#     подавался в системный промпт и не участвовал в векторном поиске,
+#     поэтому не влиял на FAQ-индекс вообще. Теперь у него своя пересборка,
+#     по своему собственному хешу — независимая от FAQ-индекса, чтобы
+#     изменение knowledge_base.json не пересобирало заново эмбеддинги
+#     faqs.json, и наоборот.
+#   - system_prompt.md — у него остался прежний отдельный механизм
+#     отслеживания: assistant.py:_ensure_fresh() подхватывает его на лету
+#     по mtime, БЕЗ пересборки векторного индекса (см. README, раздел
+#     "Обновление базы знаний") — это неструктурированный текст инструкции
+#     для GigaChat, не источник фактов для поиска.
 _IGNORED_NAMES = {
     "faiss_index.bin",
     "faqs_metadata.npy",
     "data_hash.txt",
     "faqs_hash.txt",
-    "system_prompt.md",
+    "kb_faiss_index.bin",
+    "kb_metadata.npy",
+    "kb_data_hash.txt",
     "knowledge_base.json",
+    "system_prompt.md",
 }
 
 # Расширения, которые понимаются как "сырой текстовый документ с
@@ -55,8 +74,84 @@ def embed_texts(texts: List[str]) -> np.ndarray:
     return vectors.astype("float32")
 
 
+def _build_faiss_from_items(items: List[dict], index_path: str, meta_path: str):
+    """Общая механика построения FAISS-индекса из списка {"question",
+    "answer"} элементов — переиспользуется и для FAQ-индекса (main ниже), и
+    для KB-индекса (build_kb_index ниже), чтобы не дублировать одну и ту же
+    логику embed_texts/faiss.IndexFlatL2/write_index дважды."""
+    texts = [f"{item['question']}\n{item['answer']}" for item in items]
+
+    print(f"Embedding {len(texts)} items...")
+    embeddings = embed_texts(texts)
+
+    dim = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dim)
+    index.add(embeddings)
+
+    os.makedirs(os.path.dirname(index_path), exist_ok=True)
+    write_index(index, index_path)
+
+    meta = np.array(
+        [{"question": item["question"], "answer": item["answer"]} for item in items],
+        dtype=object,
+    )
+    np.save(meta_path, meta)
+
+    print(f"Index built and saved to {index_path}")
+
+
+def _file_hash(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        digest.update(f.read())
+    return digest.hexdigest()
+
+
+def _load_saved_hash(hash_path: str) -> str:
+    if not os.path.exists(hash_path):
+        return ""
+    with open(hash_path, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def _save_hash(hash_path: str, value: str):
+    with open(hash_path, "w", encoding="utf-8") as f:
+        f.write(value)
+
+
+def build_kb_index(force: bool = False):
+    """Пересобирает ОТДЕЛЬНЫЙ индекс из knowledge_base.json — разбивает на
+    чанки (backend/kb_chunker.py) и строит FAISS-индекс тем же способом,
+    что и FAQ-индекс, но в отдельные файлы (KB_INDEX_PATH/KB_META_PATH), не
+    смешивая с faqs.json. Пересобирается только если knowledge_base.json
+    реально изменился с прошлой сборки (по хешу содержимого файла, как и
+    FAQ-индекс выше) — не на каждый запуск."""
+    if not os.path.exists(KB_DATA_PATH):
+        print(f"{KB_DATA_PATH} не найден — KB-индекс не собран (это ожидаемо, если файл не создан).")
+        return
+
+    current_hash = _file_hash(KB_DATA_PATH)
+    saved_hash = _load_saved_hash(KB_HASH_PATH)
+
+    if not force and current_hash == saved_hash and os.path.exists(KB_INDEX_PATH) and os.path.exists(KB_META_PATH):
+        print("knowledge_base.json не изменился с прошлой сборки — KB-индекс актуален, пересборка не требуется.")
+        return
+
+    if not saved_hash and not os.path.exists(KB_INDEX_PATH):
+        print("Готового KB-индекса нет — собираю с нуля.")
+    else:
+        print("Обнаружены изменения в knowledge_base.json — пересобираю KB-индекс.")
+
+    chunks = chunk_knowledge_base(KB_DATA_PATH)
+    if not chunks:
+        raise RuntimeError(f"{KB_DATA_PATH} не дал ни одного чанка для индексации (пустой файл?).")
+
+    _build_faiss_from_items(chunks, KB_INDEX_PATH, KB_META_PATH)
+    _save_hash(KB_HASH_PATH, current_hash)
+
+
 def _iter_watched_files():
-    """Все файлы в data/, которые реально участвуют в сборке индекса —
+    """Все файлы в data/, которые реально участвуют в сборке FAQ-индекса —
     faqs.json плюс любые новые текстовые файлы с инструкциями, если их
     туда положили (в любом порядке, с любым именем). Отсортировано по
     имени файла — чтобы порядок обхода (и, соответственно, порядок
@@ -89,18 +184,6 @@ def _combined_hash(file_paths: List[str]) -> str:
     return digest.hexdigest()
 
 
-def _load_saved_hash() -> str:
-    if not os.path.exists(HASH_PATH):
-        return ""
-    with open(HASH_PATH, "r", encoding="utf-8") as f:
-        return f.read().strip()
-
-
-def _save_hash(value: str):
-    with open(HASH_PATH, "w", encoding="utf-8") as f:
-        f.write(value)
-
-
 def _load_text_document(path: str) -> dict:
     """Читает произвольный текстовый файл (.txt/.md, кроме faqs.json и
     файлов из _IGNORED_NAMES) как ОДИН Q&A-элемент: "question" — имя файла
@@ -131,10 +214,11 @@ def _load_all_items(file_paths: List[str]) -> List[dict]:
             print(f"Loaded {len(faq_items)} FAQ items from {name}")
             items.extend(faq_items)
         elif ext == ".json":
-            # Любой ДРУГОЙ .json в data/ (не faqs.json) — тот же формат
-            # [{"question": ..., "answer": ...}, ...], что и faqs.json. Так
-            # HR может добавить, например, faqs_vahta.json отдельным
-            # файлом, не редактируя существующий faqs.json.
+            # Любой ДРУГОЙ .json в data/ (не faqs.json, не knowledge_base.json
+            # — тот отслеживается отдельно, см. build_kb_index) — тот же
+            # формат [{"question": ..., "answer": ...}, ...], что и
+            # faqs.json. Так HR может добавить, например, faqs_vahta.json
+            # отдельным файлом, не редактируя существующий faqs.json.
             faq_items = load_faq_data(path)
             print(f"Loaded {len(faq_items)} FAQ items from {name}")
             items.extend(faq_items)
@@ -163,48 +247,28 @@ def main(force: bool = False):
         )
 
     current_hash = _combined_hash(file_paths)
-    saved_hash = _load_saved_hash()
+    saved_hash = _load_saved_hash(HASH_PATH)
 
     if not force and current_hash == saved_hash and os.path.exists(INDEX_PATH) and os.path.exists(META_PATH):
-        print("Файлы базы знаний не изменились с прошлой сборки — индекс актуален, пересборка не требуется.")
-        return
-
-    if not saved_hash and not os.path.exists(INDEX_PATH):
-        print("Готового индекса нет — собираю с нуля.")
+        print("Файлы базы знаний не изменились с прошлой сборки — FAQ-индекс актуален, пересборка не требуется.")
     else:
-        print("Обнаружены изменения в data/ — пересобираю индекс.")
+        if not saved_hash and not os.path.exists(INDEX_PATH):
+            print("Готового FAQ-индекса нет — собираю с нуля.")
+        else:
+            print("Обнаружены изменения в data/ — пересобираю FAQ-индекс.")
 
-    items = _load_all_items(file_paths)
+        items = _load_all_items(file_paths)
 
-    if not items:
-        raise RuntimeError("No data found to build index (data/ contains no usable Q&A items).")
+        if not items:
+            raise RuntimeError("No data found to build index (data/ contains no usable Q&A items).")
 
-    texts = [f"{item['question']}\n{item['answer']}" for item in items]
+        _build_faiss_from_items(items, INDEX_PATH, META_PATH)
+        _save_hash(HASH_PATH, current_hash)
 
-    print(f"Embedding {len(texts)} items...")
-    embeddings = embed_texts(texts)
-
-    dim = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dim)
-    index.add(embeddings)
-
-    os.makedirs(os.path.dirname(INDEX_PATH), exist_ok=True)
-    write_index(index, INDEX_PATH)
-
-    meta = np.array(
-        [
-            {
-                "question": item["question"],
-                "answer": item["answer"],
-            }
-            for item in items
-        ],
-        dtype=object,
-    )
-    np.save(META_PATH, meta)
-    _save_hash(current_hash)
-
-    print(f"Index built and saved to {INDEX_PATH}")
+    # KB-индекс — независимая пересборка со своим собственным хешем (см.
+    # build_kb_index) — не завязана на хеш faqs.json выше, изменение одного
+    # файла не должно триггерить пересборку другого.
+    build_kb_index(force=force)
 
 
 if __name__ == "__main__":

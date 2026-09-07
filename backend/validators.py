@@ -83,6 +83,14 @@ def _validate_phone(value: str, field_name: str) -> str:
 
 def _validate_telegram(value: str, field_name: str) -> str:
     v = _require_nonempty(value, field_name, _MAX_SHORT_LEN)
+    # "нет"/"нету"/"не имею" — допустимый ответ отдельно от формата
+    # username: наличие Telegram у кандидата НЕобязательно (в отличие от,
+    # например, телефона), а вопрос в anketa.py прямо предлагает такой
+    # вариант — раз вопрос предлагает эту опцию, валидатор обязан её
+    # принимать, иначе кандидат честно ответивший "нет" не может пройти
+    # этот шаг анкеты вообще.
+    if v.lower() in ("нет", "нету", "не имею", "отсутствует"):
+        return v
     if not re.fullmatch(r"@?[A-Za-z0-9_]{5,32}", v):
         raise FieldValidationError(
             field_name, "похоже на неверный Telegram-юзернейм (латиница/цифры/_, 5-32 символа)."

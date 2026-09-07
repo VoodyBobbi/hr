@@ -143,15 +143,6 @@ const messages = document.getElementById("chat-messages");
 const input = document.getElementById("chat-input");
 const sendBtn = document.getElementById("chat-send");
 
-function getSessionId() {
-  let sessionId = localStorage.getItem("faq_session_id");
-  if (!sessionId) {
-    sessionId = crypto.randomUUID();
-    localStorage.setItem("faq_session_id", sessionId);
-  }
-  return sessionId;
-}
-
 icon.addEventListener("click", () => {
   chatWindow.style.display = chatWindow.style.display === "flex" ? "none" : "flex";
 });
@@ -172,20 +163,21 @@ async function sendMessage() {
   input.value = "";
 
   try {
+    // session_id больше не хранится и не читается в JS (localStorage) — им
+    // управляет сервер через HttpOnly cookie (см. backend/app.py), которую
+    // JavaScript в принципе не может ни прочитать, ни подделать. credentials:
+    // "include" обязателен — без него браузер не приложит cookie к запросу
+    // даже если она уже есть (особенно важно для cross-origin, когда сайт
+    // с чат-виджетом и сервер бота — разные домены).
     const response = await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({
         message: text,
-        top_k: 3,
-        session_id: getSessionId(),
       })
     });
     const data = await response.json();
-
-    if (data.session_id) {
-      localStorage.setItem("faq_session_id", data.session_id);
-    }
 
     addMessage(data.answer, "bot");
   } catch (err) {

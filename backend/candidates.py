@@ -5,6 +5,7 @@ import os
 import threading
 from datetime import datetime
 
+from . import logger
 from . import paths
 from .crypto_utils import decrypt_bytes, encrypt_bytes
 from .validators import FieldValidationError, validate_field
@@ -246,9 +247,19 @@ def delete_candidate(candidate_id: str) -> dict:
     """Полное удаление данных кандидата по его запросу (право на удаление, 152-ФЗ).
 
     Удаляет: строку кандидата из candidates.csv, его запись(и) в
-    candidate_sessions.json (маппинг source:external_id -> candidate_id) и
-    файл(ы) истории переписки data*/conversations соответствующие найденным
-    сессиям этого кандидата.
+    candidate_sessions.json (маппинг source:external_id -> candidate_id),
+    файл(ы) истории переписки data*/conversations и строки в logs.csv,
+    соответствующие найденным сессиям этого кандидата.
+
+    Логи удаляются ОТДЕЛЬНО от истории переписки (logger.delete_logs_for_session,
+    не просто os.remove как для conversations) намеренно: в отличие от
+    истории (один файл на сессию), logs.csv — общий файл на ВСЕХ кандидатов
+    сразу, поэтому удаление означает вырезание конкретных строк из общего
+    файла, а не удаление файла целиком. До этого logs.csv не трогался
+    вообще — при запросе на полное удаление данных в нём оставался тот же
+    текст переписки (те же персональные данные), что и в уже удалённой
+    истории — запрос выполнялся не полностью, что прямо противоречит праву
+    на удаление по ст. 21 152-ФЗ.
 
     Возвращает словарь с тем, что реально было удалено — полезно для лога/ответа HR.
     """
@@ -267,16 +278,21 @@ def delete_candidate(candidate_id: str) -> dict:
             _save_sessions(sessions)
 
     removed_conversations = []
+    removed_log_rows = 0
     for key in removed_sessions:
         source, _, external_id = key.partition(":")
+
         conv_path = paths.conversation_path(source, external_id)
         if os.path.exists(conv_path):
             os.remove(conv_path)
             removed_conversations.append(conv_path)
+
+        removed_log_rows += logger.delete_logs_for_session(source, external_id)
 
     return {
         "candidate_id": candidate_id,
         "removed_from_table": existed_in_table,
         "removed_sessions": removed_sessions,
         "removed_conversations": removed_conversations,
+        "removed_log_rows": removed_log_rows,
     }

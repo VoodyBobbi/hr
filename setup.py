@@ -29,6 +29,92 @@ ENV_EXAMPLE_PATH = os.path.join(PROJECT_ROOT, ".env.example")
 REQUIREMENTS_PATH = os.path.join(PROJECT_ROOT, "requirements.txt")
 
 
+def _install_gigachat_certificate():
+    """GigaChat API использует сертификаты, выданные российским НУЦ
+    Минцифры — этот корневой сертификат НЕ входит по умолчанию в системные
+    доверенные хранилища (ни ОС, ни Python/certifi). Без него запрос к
+    GigaChat падает с ошибкой "[SSL: CERTIFICATE_VERIFY_FAILED]... self-
+    signed certificate in certificate chain" (см. официальную документацию:
+    https://developers.sber.ru/docs/ru/gigachat/certificates) — это не
+    ошибка конфигурации проекта, а следствие российской PKI-инфраструктуры,
+    через которую работает GigaChat.
+
+    Раньше это обходили передачей verify_ssl_certs=False в assistant.py —
+    рабочий, но НЕБЕЗОПАСНЫЙ способ: он отключает проверку TLS-сертификата
+    ЦЕЛИКОМ, а не только для GigaChat — при подмене сервера (MITM, например
+    в незащищённой Wi-Fi сети) программа не отличит настоящий GigaChat от
+    поддельного и молча отправит туда данные кандидатов.
+
+    Правильный путь (используется здесь) — установить сам сертификат
+    Минцифры в доверенное хранилище certifi ОДИН РАЗ, тогда обычная (по
+    умолчанию включённая) проверка TLS начинает работать корректно, не
+    ломая соединение — команда ниже взята из официальной документации SDK:
+    https://pypi.org/project/gigachat/ (раздел "Установка корневого
+    сертификата Минцифры России").
+
+    Идемпотентно: если сертификат уже был добавлен раньше (повторный запуск
+    setup.py) — не добавляет его повторно, определяя это по уникальной
+    подстроке в самом сертификате."""
+    try:
+        import certifi
+    except ImportError:
+        # certifi ставится транзитивно вместе с httpx (зависимость
+        # gigachat/fastapi) — если он всё ещё недоступен, значит
+        # _install_dependencies() выше не отработал как ожидалось; не
+        # валим всю установку из-за этого, просто предупреждаем.
+        print()
+        print("ВНИМАНИЕ: не удалось найти модуль certifi — сертификат Минцифры")
+        print("не установлен автоматически. GigaChat может не заработать.")
+        print("Установите вручную по инструкции:")
+        print("https://developers.sber.ru/docs/ru/gigachat/certificates")
+        return
+
+    cert_bundle_path = certifi.where()
+    # Уникальная подстрока именно этого сертификата (Common Name корневого
+    # сертификата НУЦ Минцифры) — используется как маркер "уже установлен",
+    # а не просто проверка "файл существует", потому что cacert.pem — общий
+    # файл со множеством других сертификатов внутри.
+    marker = "Russian Trusted Root CA"
+
+    with open(cert_bundle_path, "r", encoding="utf-8", errors="ignore") as f:
+        already_installed = marker in f.read()
+
+    if already_installed:
+        print("Сертификат НУЦ Минцифры для GigaChat уже установлен — пропускаю.")
+        return
+
+    print("Устанавливаю корневой сертификат НУЦ Минцифры (нужен для GigaChat)...")
+    try:
+        import urllib.request
+        import ssl
+
+        cert_url = "https://gu-st.ru/content/Other/doc/russian_trusted_root_ca.cer"
+        # Официальная команда использует curl -k (без проверки TLS для ЭТОЙ
+        # конкретной загрузки) — тот же принцип воспроизведён здесь через
+        # ssl._create_unverified_context(): само же скачивание сертификата,
+        # которым мы собираемся ПОЧИНИТЬ проверку сертификатов, не может
+        # зависеть от уже работающей проверки сертификатов (это ещё не
+        # установлено на этом шаге) — курица и яйцо. Риск здесь ограничен:
+        # сама подмена ответа на этот конкретный запрос дала бы поддельный
+        # сертификат, который добавился бы в доверенные, но URL жёстко
+        # захардкожен на официальный государственный домен gu-st.ru, не
+        # приходит откуда-либо ещё (не из .env, не из аргументов) и не
+        # может быть подменён через конфигурацию проекта.
+        unverified_context = ssl._create_unverified_context()
+        with urllib.request.urlopen(cert_url, context=unverified_context, timeout=15) as response:
+            cert_data = response.read().decode("utf-8")
+    except Exception as e:
+        print(f"Не удалось скачать сертификат Минцифры автоматически: {e}")
+        print("GigaChat может не заработать. Установите сертификат вручную:")
+        print("https://developers.sber.ru/docs/ru/gigachat/certificates")
+        return
+
+    with open(cert_bundle_path, "a", encoding="utf-8") as f:
+        f.write("\n" + cert_data)
+
+    print("Сертификат НУЦ Минцифры установлен.")
+
+
 def _install_dependencies():
     print("Устанавливаю зависимости из requirements.txt (это может занять несколько минут)...")
     result = subprocess.run(
@@ -170,6 +256,7 @@ def _check_other_required_settings():
 
 def main():
     _install_dependencies()
+    _install_gigachat_certificate()
     _ensure_env_file()
     _ensure_encryption_key()
     _check_other_required_settings()

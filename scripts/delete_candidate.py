@@ -10,11 +10,12 @@ ID кандидата — это номер колонки в candidates.csv (п
 работы с ботом, либо явно из кода (candidates.get_card).
 
 Стирает безвозвратно:
-  - строку этого кандидата в HR/candidates/candidates.csv;
-  - его запись(и) в HR/candidates/candidate_sessions.json (привязку сессии к ID);
-  - файл(ы) истории переписки в папке conversations.
-
-НЕ трогает logs/logs.csv — решение: логи хранить полностью, без изменений.
+  - строку этого кандидата в candidates/candidates.csv;
+  - его запись(и) в candidates/candidate_sessions.json (привязку сессии к ID);
+  - файл(ы) истории переписки в папке HR/conversations;
+  - строки этого кандидата в logs/logs.csv (по совпадению источника и ID
+    пользователя — те же вопросы/ответы, что и в уже удалённой истории
+    переписки, оставались бы там персональными данными).
 """
 import argparse
 import sys
@@ -49,7 +50,7 @@ def main():
     print(f"  - строка в candidates.csv: {'да' if result['removed_from_table'] else 'уже отсутствовала'}")
     print(f"  - записи в candidate_sessions.json: {result['removed_sessions'] or 'не найдено'}")
     print(f"  - файлы истории переписки: {result['removed_conversations'] or 'не найдено'}")
-    print("logs/logs.csv не менялся — по решению логи и историю хранить полностью.")
+    print(f"  - строк в logs.csv: {result['removed_log_rows']}")
 
 
 if __name__ == "__main__":

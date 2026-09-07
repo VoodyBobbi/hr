@@ -17,6 +17,18 @@ __pycache__/
 *.db-shm
 *.sqlite3
 
+# Сгенерированные артефакты векторного индекса (data/). Пересобираются
+# автоматически при каждом запуске (python start.py / run_all.py), если
+# faqs.json/knowledge_base.json изменились — см. backend/build_index.py.
+# Коммитить не нужно: бинарные файлы, должны пересобираться из исходных
+# .json на каждой машине заново, а не таскаться через git.
+data/faiss_index.bin
+data/faqs_metadata.npy
+data/data_hash.txt
+data/kb_faiss_index.bin
+data/kb_metadata.npy
+data/kb_data_hash.txt
+
 # Персональные данные (анкеты, история переписки, логи). По умолчанию (без
 # HR_DATA_DIR в .env) программа сама создаёт и пишет их в HR/ внутри папки
 # проекта, рядом с backend/ и data/ — САМОЕ ВАЖНОЕ, чтобы эта папка никогда

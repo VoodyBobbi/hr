@@ -27,10 +27,20 @@ import os
 
 import httpx
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_HR_GROUP_CHAT_ID = os.getenv("TELEGRAM_HR_GROUP_CHAT_ID")
-
 _API_URL_TEMPLATE = "https://api.telegram.org/bot{token}/sendMessage"
+
+
+def _settings() -> tuple:
+    """Токен бота и chat_id HR-группы, прочитанные В МОМЕНТ ОТПРАВКИ.
+
+    Раньше обе переменные читались один раз при импорте модуля. Работало это
+    только благодаря удачному порядку импортов: backend.paths вызывает
+    load_dotenv() и импортируется по цепочке раньше, чем этот модуль. Стоило
+    поменять порядок строк в assistant.py — и переменные читались бы из
+    пустого окружения, а уведомления HR молча перестали бы приходить.
+    Чтение при вызове убирает эту зависимость от порядка импортов
+    насовсем."""
+    return os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_HR_GROUP_CHAT_ID")
 
 
 def hr_notifications_enabled() -> bool:
@@ -38,22 +48,24 @@ def hr_notifications_enabled() -> bool:
     HR-группе. Если что-то не задано — уведомления просто тихо не
     отправляются (это НЕ обязательная функция: без Telegram-канала или без
     настроенной группы весь остальной бот должен продолжать работать)."""
-    return bool(TELEGRAM_BOT_TOKEN and TELEGRAM_HR_GROUP_CHAT_ID)
+    token, chat_id = _settings()
+    return bool(token and chat_id)
 
 
 def send_hr_notification(text: str) -> None:
     """Отправляет текстовое сообщение в HR-группу. Никогда не бросает
     исключение наружу — сбой уведомления не должен ронять сам ответ
     кандидату (это дополнительная, не критичная для работы бота функция)."""
-    if not hr_notifications_enabled():
+    token, chat_id = _settings()
+    if not (token and chat_id):
         return
 
-    url = _API_URL_TEMPLATE.format(token=TELEGRAM_BOT_TOKEN)
+    url = _API_URL_TEMPLATE.format(token=token)
     try:
         response = httpx.post(
             url,
             json={
-                "chat_id": TELEGRAM_HR_GROUP_CHAT_ID,
+                "chat_id": chat_id,
                 "text": text,
                 "parse_mode": "HTML",
             },

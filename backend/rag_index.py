@@ -6,7 +6,7 @@ import faiss
 import numpy as np
 
 
-def write_index(index: faiss.IndexFlatL2, path: str) -> None:
+def write_index(index: faiss.Index, path: str) -> None:
     """Сохраняет FAISS-индекс на диск.
 
     Пишет НЕ через faiss.write_index(index, path) напрямую, а через
@@ -27,7 +27,7 @@ def write_index(index: faiss.IndexFlatL2, path: str) -> None:
         f.write(chunk.tobytes())
 
 
-def load_index(index_path: str, meta_path: str) -> Tuple[faiss.IndexFlatL2, np.ndarray]:
+def load_index(index_path: str, meta_path: str) -> Tuple[faiss.Index, np.ndarray]:
     if not os.path.exists(index_path) or not os.path.exists(meta_path):
         raise RuntimeError(
             "FAISS index or metadata not found. "
@@ -45,24 +45,39 @@ def load_index(index_path: str, meta_path: str) -> Tuple[faiss.IndexFlatL2, np.n
 
 
 def search_similar(
-    index: faiss.IndexFlatL2,
+    index: faiss.Index,
     metadata: np.ndarray,
     query_vec: np.ndarray,
     k: int = 3,
-    max_distance: float = 1.0,
+    min_similarity: float = 0.45,
 ) -> List[Any]:
+    """Ближайшие к запросу элементы, отсечённые по порогу близости.
+
+    Индекс — faiss.IndexFlatIP (скалярное произведение). Все векторы
+    нормализованы к единичной длине (normalize_embeddings=True в
+    build_index.embed_texts и assistant.embed_text), а для единичных векторов
+    скалярное произведение РАВНО косинусной близости. Поэтому index.search
+    возвращает сразу косинусную близость в диапазоне от -1 до 1, где больше —
+    похожее.
+
+    Раньше использовался IndexFlatL2, который возвращает КВАДРАТ евклидова
+    расстояния (меньше — похожее, диапазон 0..4). Порог в таких единицах
+    невозможно осмыслить на глаз, и именно из-за этого прежнее значение 1.0
+    было выставлено неверно. Косинусная близость читается напрямую: 0.45 —
+    «примерно об одном», 0.75 — «почти то же самое».
+
+    Реальные пороги задаёт вызывающий код из .env: FAQ_MIN_SIMILARITY
+    (строже — готовый ответ уходит кандидату напрямую, без GigaChat) и
+    KB_MIN_SIMILARITY (мягче — факты только подмешиваются в промпт).
+    См. backend/assistant.py и README, раздел «Калибровка порогов поиска».
+
+    Без порога поиск возвращал бы k ближайших даже при полностью
+    нерелевантном запросе, подмешивая случайный контекст в промпт модели.
     """
-    max_distance — порог L2-расстояния для эмбеддингов paraphrase-multilingual-MiniLM-L12-v2
-    (нормализованные векторы, L2 в диапазоне ~0..2). Значение 1.0 — стартовая отсечка,
-    НЕ откалибрована на реальных данных проекта — нужно проверить на живых вопросах
-    ("привет", "кто ты?", односложные ответы) и подобрать точнее по логам.
-    Без порога поиск всегда возвращал top_k ближайших даже при нерелевантном запросе,
-    что подмешивало случайный FAQ-контекст в промпт модели.
-    """
-    distances, indices = index.search(query_vec, k)
+    similarities, indices = index.search(query_vec, k)
     results = []
-    for dist, i in zip(distances[0], indices[0]):
-        if 0 <= i < len(metadata) and dist <= max_distance:
+    for score, i in zip(similarities[0], indices[0]):
+        if 0 <= i < len(metadata) and score >= min_similarity:
             results.append(metadata[i])
     return results
 

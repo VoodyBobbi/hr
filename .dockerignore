@@ -7,8 +7,27 @@ venv/
 __pycache__/
 *.pyc
 
-# Персональные данные — вне образа (см. backend/paths.py и .gitignore)
+# Персональные данные — НИКОГДА не должны попадать внутрь образа.
+# Список обязан совпадать с .gitignore: без этого `COPY . .` в Dockerfile
+# упаковывает анкеты кандидатов и историю переписки прямо в образ, который
+# потом можно случайно отправить в реестр. Именно так здесь и было: в списке
+# стояло `candidats/` (старое имя с опечаткой), а реальные `candidates/` и
+# `HR/` не исключались.
+candidates/
+history/
+logs/
 hr-data/
+
+# Прежние расположения — подстраховка для старых рабочих копий.
+HR/
 candidats/
 data/conversations/
-logs/
+
+# Сгенерированные артефакты индекса: пересобираются внутри контейнера при
+# старте (см. start.sh), тащить их в образ не нужно.
+data/faiss_index.bin
+data/faqs_metadata.npy
+data/data_hash.txt
+data/kb_faiss_index.bin
+data/kb_metadata.npy
+data/kb_data_hash.txt

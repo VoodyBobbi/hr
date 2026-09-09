@@ -2,202 +2,433 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<title>FAQ-ассистент</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Работа в ПОЛАТИ — вахта на промышленных объектах</title>
 <style>
-  body {
-    font-family: Arial, sans-serif;
-    margin: 0;
-    padding: 40px;
-    min-height: 100vh;
-    background-image:
-      linear-gradient(rgba(245, 245, 245, 0.75), rgba(245, 245, 245, 0.75)),
-      url("/static/background.png");
-    background-size: cover;
-    background-position: center;
-    background-attachment: fixed;
-  }
+/* ---------------------------------------------------------------------
+   ОДИН ЭКРАН БЕЗ ПРОКРУТКИ
 
-  #chat-icon {
-    position: fixed;
-    bottom: 24px;
-    right: 24px;
-    width: 60px;
-    height: 60px;
-    border-radius: 50%;
-    background: #2563eb;
-    color: white;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 28px;
-    cursor: pointer;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-    z-index: 1000;
-  }
+   Страница не прокручивается вообще: html и body фиксированы по высоте
+   экрана с overflow:hidden. Прокручивается ровно одна область — лента
+   сообщений (#feed). Это и есть требование «одна страница, не крутящаяся
+   вниз и вверх»: у страницы нет полосы прокрутки, у переписки — есть,
+   иначе длинный диалог было бы невозможно читать.
 
-  #chat-window {
-    position: fixed;
-    bottom: 96px;
-    right: 24px;
-    width: 340px;
-    height: 460px;
-    background: white;
-    border-radius: 12px;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.25);
-    display: none;
-    flex-direction: column;
-    overflow: hidden;
-    z-index: 1000;
-  }
+   100dvh, а не 100vh: на мобильных браузерах 100vh считается по высоте
+   окна БЕЗ учёта адресной строки, из-за чего нижняя часть экрана (у нас —
+   поле ввода) уезжает под неё. dvh учитывает реальную видимую область и
+   пересчитывается, когда строка прячется. 100vh оставлен запасным
+   значением для старых браузеров, не знающих dvh.
 
-  #chat-header {
-    background: #2563eb;
-    color: white;
-    padding: 12px 16px;
-    font-weight: bold;
-  }
+   ЦВЕТА взяты из фирменных материалов компании: синий логотипа и
+   оранжевый с полиграфии ПОЛАТИ, плюс стальные оттенки под тему
+   промышленного строительства.
 
-  #chat-messages {
-    flex: 1;
-    padding: 12px;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
+   ШРИФТ системный, без загрузки из интернета. Это сознательный выбор:
+   кандидаты открывают страницу с телефона, часто на мобильном интернете
+   вдали от города, а веб-шрифт добавил бы и задержку, и зависимость от
+   стороннего CDN, которой у проекта больше нигде нет.
+--------------------------------------------------------------------- */
+:root{
+  --ink:#101C24;
+  --blue:#0B5FA5;
+  --sky:#24A2E8;
+  --safety:#F07C22;
+  --pale:#EDF1F4;
+  --paper:#FFFFFF;
+  --line:rgba(255,255,255,.16);
+  --muted:#5C7080;
+}
 
-  .msg {
-    max-width: 80%;
-    padding: 8px 12px;
-    border-radius: 10px;
-    font-size: 14px;
-    line-height: 1.4;
-  }
+*{box-sizing:border-box;margin:0;padding:0}
 
-  .msg.user {
-    align-self: flex-end;
-    background: #2563eb;
-    color: white;
-  }
+html,body{
+  height:100vh;
+  height:100dvh;
+  overflow:hidden;
+}
 
-  .msg.bot {
-    align-self: flex-start;
-    background: #f0f0f0;
-    color: #111;
-  }
+body{
+  font-family:"Segoe UI","Inter","Roboto","Helvetica Neue",Arial,sans-serif;
+  background:var(--ink);
+  color:var(--ink);
+  -webkit-font-smoothing:antialiased;
+}
 
-  #chat-input-area {
-    display: flex;
-    border-top: 1px solid #eee;
-  }
+#shell{
+  height:100%;
+  display:grid;
+  grid-template-columns:minmax(0,42fr) minmax(0,58fr);
+}
 
-  #chat-input {
-    flex: 1;
-    border: none;
-    padding: 12px;
-    font-size: 14px;
-    outline: none;
-  }
+/* ======================= ЛЕВАЯ ЧАСТЬ: ПРЕДЛОЖЕНИЕ ==================== */
 
-  #chat-send {
-    border: none;
-    background: #2563eb;
-    color: white;
-    padding: 0 16px;
-    cursor: pointer;
-    font-size: 14px;
+#pitch{
+  position:relative;
+  min-width:0;
+  padding:clamp(28px,3.4vw,56px);
+  display:flex;
+  flex-direction:column;
+  justify-content:space-between;
+  background:
+    linear-gradient(180deg,rgba(16,28,36,.62) 0%,rgba(11,95,165,.72) 100%),
+    url("/static/hero-alpinist.jpg") center/cover no-repeat;
+  color:#fff;
+  overflow:hidden;
+}
+
+/* Вертикальные волоски — мотив стоек строительных лесов. Не украшение:
+   они привязаны к трём цифрам ниже и визуально держат их в одной
+   структуре, как леса держат ярусы. */
+#pitch::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  background-image:
+    linear-gradient(90deg,var(--line) 1px,transparent 1px),
+    linear-gradient(90deg,var(--line) 1px,transparent 1px),
+    linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:100% 100%;
+  background-position:22% 0,52% 0,82% 0;
+  background-repeat:no-repeat;
+}
+
+#pitch > *{position:relative;z-index:1}
+
+.brand{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  font-size:15px;
+  letter-spacing:.16em;
+  font-weight:600;
+}
+.brand span{opacity:.82}
+.mark{
+  width:26px;height:26px;flex:none;
+  border:2px solid #fff;
+  border-radius:4px;
+  position:relative;
+}
+.mark::before{
+  content:"";position:absolute;inset:5px;
+  border-top:2px solid #fff;
+  border-bottom:2px solid #fff;
+}
+
+h1{
+  font-size:clamp(30px,3.6vw,54px);
+  line-height:1.04;
+  letter-spacing:-.022em;
+  font-weight:700;
+  max-width:12ch;
+}
+
+.lede{
+  margin-top:16px;
+  font-size:clamp(15px,1.15vw,18px);
+  line-height:1.5;
+  max-width:34ch;
+  color:rgba(255,255,255,.86);
+}
+
+.facts{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:clamp(12px,1.6vw,26px);
+  border-top:1px solid var(--line);
+  padding-top:clamp(16px,1.8vw,26px);
+}
+.fact b{
+  display:block;
+  font-size:clamp(21px,2.5vw,36px);
+  font-weight:700;
+  letter-spacing:-.02em;
+  line-height:1.05;
+}
+.fact span{
+  display:block;
+  margin-top:6px;
+  font-size:clamp(11px,.85vw,13px);
+  line-height:1.35;
+  color:rgba(255,255,255,.74);
+}
+
+/* ========================= ПРАВАЯ ЧАСТЬ: ЧАТ ========================= */
+
+#chat{
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  background:var(--pale);
+}
+
+#bar{
+  flex:none;
+  padding:16px clamp(16px,2vw,28px);
+  background:var(--paper);
+  border-bottom:1px solid #DCE3E8;
+  display:flex;
+  align-items:center;
+  gap:11px;
+}
+#bar strong{font-size:15px;font-weight:600}
+#bar em{font-style:normal;font-size:13px;color:var(--muted)}
+.dot{
+  width:8px;height:8px;flex:none;
+  border-radius:50%;
+  background:#2BB673;
+}
+
+/* Единственная прокручиваемая область на всей странице. */
+#feed{
+  flex:1 1 auto;
+  min-height:0;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  padding:clamp(16px,2vw,26px);
+  display:flex;
+  flex-direction:column;
+  gap:12px;
+  scrollbar-width:thin;
+}
+
+.msg{
+  max-width:min(72ch,86%);
+  padding:11px 15px;
+  font-size:15px;
+  line-height:1.5;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+}
+.msg.bot{
+  align-self:flex-start;
+  background:var(--paper);
+  border-radius:3px 14px 14px 14px;
+  box-shadow:0 1px 2px rgba(16,28,36,.09);
+}
+.msg.me{
+  align-self:flex-end;
+  background:var(--blue);
+  color:#fff;
+  border-radius:14px 3px 14px 14px;
+}
+.msg.wait{color:var(--muted);font-style:italic}
+
+#chips{
+  flex:none;
+  display:flex;
+  gap:8px;
+  padding:0 clamp(16px,2vw,26px) 12px;
+  overflow-x:auto;
+  scrollbar-width:none;
+}
+#chips::-webkit-scrollbar{display:none}
+#chips button{
+  flex:none;
+  font:inherit;
+  font-size:13.5px;
+  color:var(--blue);
+  background:var(--paper);
+  border:1px solid #CFDAE2;
+  border-radius:999px;
+  padding:7px 14px;
+  cursor:pointer;
+}
+#chips button:hover{border-color:var(--sky);color:var(--sky)}
+
+#compose{
+  flex:none;
+  display:flex;
+  gap:10px;
+  padding:12px clamp(16px,2vw,26px);
+  padding-bottom:calc(12px + env(safe-area-inset-bottom));
+  background:var(--paper);
+  border-top:1px solid #DCE3E8;
+}
+#text{
+  flex:1 1 auto;
+  min-width:0;
+  font:inherit;
+  font-size:16px; /* 16px не даёт iOS увеличивать страницу при фокусе */
+  padding:12px 14px;
+  border:1px solid #CFDAE2;
+  border-radius:10px;
+  background:var(--pale);
+  color:var(--ink);
+}
+#text::placeholder{color:#8C9DA9}
+#send{
+  flex:none;
+  width:48px;
+  border:0;
+  border-radius:10px;
+  background:var(--safety);
+  color:#fff;
+  font-size:19px;
+  line-height:1;
+  cursor:pointer;
+}
+#send:disabled{background:#C3CED6;cursor:default}
+
+:focus-visible{outline:2px solid var(--sky);outline-offset:2px}
+#pitch :focus-visible{outline-color:#fff}
+
+/* ============================ ТЕЛЕФОН =============================== */
+/* Чат занимает почти весь экран, предложение сжимается в шапку: на
+   маленьком экране разговор важнее презентации. */
+@media (max-width:900px){
+  #shell{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}
+  #pitch{
+    padding:14px 16px;
+    gap:10px;
+    background:
+      linear-gradient(180deg,rgba(16,28,36,.66) 0%,rgba(11,95,165,.78) 100%),
+      url("/static/hero-alpinist.jpg") center 28%/cover no-repeat;
   }
+  #pitch::after{display:none}
+  h1{font-size:22px;max-width:none;margin-top:8px}
+  .lede{display:none}
+  .facts{margin-top:10px;padding-top:10px;gap:10px}
+  .fact b{font-size:17px}
+  .fact span{font-size:10.5px;margin-top:3px}
+  #bar{display:none}
+  .msg{max-width:92%}
+}
+
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+}
 </style>
 </head>
 <body>
 
-<h1>Мои проекты</h1>
-<div style="max-width: 600px; background: white; padding: 24px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
-  <h2>FAQ-ассистент для HR (ООО «ПОЛАТИ»)</h2>
-  <p>
-    Виртуальный менеджер по подбору персонала на базе RAG-архитектуры:
-    поиск по базе знаний компании (FAISS + sentence-transformers), генерация
-    ответов через GigaChat, память диалога, автоматическое заполнение анкеты
-    кандидата с постепенным сбором данных и учётом 152-ФЗ.
-  </p>
-  <p>Работает как на сайте (виджет справа внизу), так и в Telegram.</p>
-  <p><b>Стек:</b> FastAPI, FAISS, GigaChat API, python-telegram-bot, sentence-transformers</p>
-</div>
-<div id="chat-icon">💬</div>
+<div id="shell">
 
-<div id="chat-window">
-  <div id="chat-header">Консультант</div>
-  <div id="chat-messages"></div>
-  <div id="chat-input-area">
-    <input id="chat-input" type="text" maxlength="2000" placeholder="Напишите вопрос...">
-    <button id="chat-send">➤</button>
-  </div>
+  <section id="pitch">
+    <div class="brand"><i class="mark"></i><span>ПОЛАТИ</span></div>
+
+    <div>
+      <h1>Работа на высоте вахтой по России</h1>
+      <p class="lede">
+        Строим нефтегазовые заводы. Берём без опыта и без профильного
+        образования — обучаем сами и оформляем по трудовой книжке.
+      </p>
+    </div>
+
+    <div class="facts">
+      <div class="fact"><b>105 000 ₽</b><span>от этой суммы в месяц у новичка</span></div>
+      <div class="fact"><b>7 дней</b><span>бесплатное обучение с удостоверением</span></div>
+      <div class="fact"><b>0 ₽</b><span>за жильё, питание и дорогу на объект</span></div>
+    </div>
+  </section>
+
+  <section id="chat">
+    <div id="bar">
+      <i class="dot"></i>
+      <strong>Подбор персонала</strong>
+      <em>отвечает сразу</em>
+    </div>
+
+    <div id="feed" role="log" aria-live="polite" aria-label="Переписка"></div>
+
+    <div id="chips">
+      <button type="button">Какие есть вакансии?</button>
+      <button type="button">Сколько платят?</button>
+      <button type="button">Какие требования?</button>
+      <button type="button">Где обучение?</button>
+      <button type="button">Хочу оставить заявку</button>
+    </div>
+
+    <form id="compose" autocomplete="off">
+      <input id="text" type="text" maxlength="2000" placeholder="Напишите вопрос о работе" aria-label="Ваш вопрос">
+      <button id="send" type="submit" aria-label="Отправить">&#10148;</button>
+    </form>
+  </section>
+
 </div>
 
 <script>
 const API_URL = "/chat";
 
-const icon = document.getElementById("chat-icon");
-const chatWindow = document.getElementById("chat-window");
-const messages = document.getElementById("chat-messages");
-const input = document.getElementById("chat-input");
-const sendBtn = document.getElementById("chat-send");
+const feed  = document.getElementById("feed");
+const form  = document.getElementById("compose");
+const text  = document.getElementById("text");
+const send  = document.getElementById("send");
+const chips = document.getElementById("chips");
 
-icon.addEventListener("click", () => {
-  chatWindow.style.display = chatWindow.style.display === "flex" ? "none" : "flex";
-});
-
-function addMessage(text, sender) {
-  const div = document.createElement("div");
-  div.className = "msg " + sender;
-  div.textContent = text;
-  messages.appendChild(div);
-  messages.scrollTop = messages.scrollHeight;
+function addMessage(body, who){
+  const el = document.createElement("div");
+  el.className = "msg " + who;
+  el.textContent = body;
+  feed.appendChild(el);
+  feed.scrollTop = feed.scrollHeight;
+  return el;
 }
 
-async function sendMessage() {
-  const text = input.value.trim();
-  if (!text) return;
+addMessage(
+  "Здравствуйте! Я помогу разобраться с работой в ПОЛАТИ: вакансии, " +
+  "зарплата, вахта, обучение, документы. Спрашивайте — отвечу по делу.",
+  "bot"
+);
 
-  addMessage(text, "user");
-  input.value = "";
+let busy = false;
+
+async function ask(question){
+  if (busy || !question) return;
+  busy = true;
+  send.disabled = true;
+
+  addMessage(question, "me");
+  text.value = "";
+  const waiting = addMessage("Печатает…", "bot wait");
 
   try {
-    // session_id больше не хранится и не читается в JS (localStorage) — им
-    // управляет сервер через HttpOnly cookie (см. backend/app.py), которую
-    // JavaScript в принципе не может ни прочитать, ни подделать. credentials:
-    // "include" обязателен — без него браузер не приложит cookie к запросу
-    // даже если она уже есть (особенно важно для cross-origin, когда сайт
-    // с чат-виджетом и сервер бота — разные домены).
+    // session_id не хранится и не читается в JS. Им управляет сервер через
+    // HttpOnly-cookie (backend/app.py), которую JavaScript не может ни
+    // прочитать, ни подделать. credentials:"include" обязателен: без него
+    // браузер не приложит cookie к запросу, даже если она уже выдана.
     const response = await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({
-        message: text,
-      })
+      body: JSON.stringify({ message: question })
     });
     const data = await response.json();
-
+    waiting.remove();
     addMessage(data.answer, "bot");
   } catch (err) {
-    // Кандидат не должен видеть технические сообщения об ошибках (см.
-    // README) — даже если сеть/сервер реально недоступны, текст остаётся
-    // нейтральным, как будто бот просто не понял вопрос.
+    // Кандидату не показываем технических подробностей: для него разницы
+    // между упавшей сетью и непонятым вопросом нет, а текст ошибки только
+    // напугал бы. Формулировка нейтральная и подсказывает, что делать.
+    waiting.remove();
     addMessage(
-      "Пока не могу сформулировать точный ответ на этот вопрос. " +
-      "Уточните, пожалуйста, что именно вас интересует, либо " +
-      "свяжитесь с менеджером напрямую.",
+      "Не получилось отправить сообщение. Проверьте связь и напишите ещё раз.",
       "bot"
     );
+  } finally {
+    busy = false;
+    send.disabled = false;
+    text.focus();
   }
 }
 
-sendBtn.addEventListener("click", sendMessage);
-input.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") sendMessage();
+form.addEventListener("submit", function(e){
+  e.preventDefault();
+  ask(text.value.trim());
 });
-</script>
 
+// Подсказки исчезают после первого вопроса: дальше кандидат ведёт разговор
+// сам, а полоса кнопок только отнимала бы высоту у переписки.
+chips.addEventListener("click", function(e){
+  const button = e.target.closest("button");
+  if (!button) return;
+  ask(button.textContent.trim());
+  chips.remove();
+});
+
+text.focus();
+</script>
 </body>
 </html>

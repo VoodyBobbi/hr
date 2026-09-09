@@ -1,79 +1,130 @@
 """
-Разбивка data/knowledge_base.json на мелкие чанки для отдельного поиска в
-FAISS (см. build_index.py — knowledge_base индексируется ОТДЕЛЬНЫМ поиском
-от faqs.json, не смешивается в один общий top-3, см. rag_index.py).
+Загрузка базы знаний из data/kb/*.json и превращение её в чанки для
+векторного поиска.
 
-Раньше весь knowledge_base.json целиком подавался в системный промпт при
-каждом запросе (см. историю assistant.py — функция _build_system_prompt) —
-это тратило токены на информацию, не относящуюся к конкретному вопросу
-кандидата (например, полное описание вакансии альпиниста в промпте, когда
-кандидат спрашивает про монтажника). Разбивка на чанки + отдельный поиск
-позволяет подмешивать в промпт только те несколько фрагментов, которые
-реально релевантны текущему вопросу.
+## Зачем база разбита на файлы
 
-Гранулярность — МЕЛКАЯ: каждое самое глубоко вложенное поле отдельным
-чанком (не по верхнеуровневому разделу целиком) — точнее поиск, ценой
-большего числа чанков. Структура knowledge_base.json неравномерная (где-то
-2 уровня вложенности, где-то 5 — см. physical_tests.jump_height_30sec.5) —
-поэтому обход рекурсивный, без фиксированной глубины: чанком становится
-первое встреченное значение, которое НЕ является словарём (dict) — строка,
-число, список. Списки НЕ разбиваются на отдельные элементы (например
-selection_and_admission.forbidden_regions — один чанк из 9 регионов, не 9
-чанков по одному региону) — элементы списка обычно логически единое целое,
-разбивать их по отдельности потеряло бы смысл (одна строка из списка
-регионов сама по себе бесполезна для поиска).
+Раньше вся база знаний лежала в одном knowledge_base.json как вложенное
+дерево, а чанком становилось каждое листовое поле. Заголовком чанка при
+этом был путь в дереве — "vacancies.montazhnik.salary". Для человека это
+читаемо, но для поиска почти бесполезно: кандидат пишет "сколько платят
+монтажнику", и точка соприкосновения с текстом "vacancies.montazhnik.salary"
+минимальна.
+
+Теперь база — это папка data/kb/ с тематическими файлами (company.json,
+vacancies.json, medical.json и так далее). Два выигрыша:
+
+1. Редактировать. HR правит medical.json, не открывая всё остальное и не
+   рискуя сломать чужой раздел. Добавить новую тему — положить новый файл,
+   в коде менять ничего не нужно.
+2. Искать. У каждой записи есть человеческий заголовок (title) и список
+   ключевых слов (keywords) — синонимы и формулировки, которыми кандидат
+   реально задаёт вопрос. Всё это идёт в вектор вместе с текстом ответа,
+   и попадание становится заметно точнее.
+
+## Формат файла
+
+    {
+      "topic": "Медосмотр и здоровье",
+      "entries": [
+        {
+          "id": "med.vision",
+          "title": "Требования к зрению",
+          "keywords": ["зрение", "очки", "линзы", "диоптрии"],
+          "text": "Зрение должно быть в диапазоне от -2 до +2..."
+        }
+      ]
+    }
+
+Обязательны только "title" и "text". "id" нужен для логов и отладки,
+"keywords" — необязательный, но сильно влияющий на качество поиска список.
+
+## Что уходит в вектор, а что в промпт
+
+Это РАЗНЫЕ строки, и в этом весь смысл:
+
+- В вектор (embed_text) идёт title + keywords + text. Ключевые слова
+  расширяют «зону попадания» записи, но сами по себе кандидату не нужны.
+- В промпт GigaChat (assistant._build_system_prompt) идёт title + text.
+  Ключевые слова туда НЕ попадают — это служебный поисковый мусор, который
+  только тратил бы токены и сбивал модель.
 """
+import glob
 import json
-
-# Служебные поля верхнего уровня knowledge_base.json, не являющиеся
-# содержательной информацией для поиска — исключены из обхода.
-_IGNORED_TOP_LEVEL_KEYS = {"version"}
+import os
 
 
-def _stringify_leaf(value) -> str:
-    """Приводит лист (не-dict значение) к тексту для эмбеддинга/показа.
-    Списки строк — через запятую, не через json.dumps (читаемее и для
-    человека, и для модели эмбеддингов, чем сырой JSON-массив)."""
-    if isinstance(value, list):
-        return ", ".join(str(item) for item in value)
-    return str(value)
+def _entry_to_chunk(entry: dict, topic: str, source_file: str) -> dict | None:
+    """Одна запись базы знаний -> чанк для индекса.
+
+    Возвращает None для записи без заголовка или без текста: такая запись
+    бесполезна для поиска, но это не повод падать — HR мог оставить
+    заготовку, чтобы дописать позже."""
+    title = str(entry.get("title", "")).strip()
+    text = str(entry.get("text", "")).strip()
+    if not title or not text:
+        return None
+
+    keywords = entry.get("keywords") or []
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    keywords_text = " ".join(str(k).strip() for k in keywords if str(k).strip())
+
+    return {
+        # Ключи "question"/"answer" — тот же формат, что у элементов
+        # faqs.json, чтобы переиспользовать общую механику эмбеддинга и
+        # поиска (build_index._build_faiss_from_items) без дублирования.
+        "question": title,
+        "answer": text,
+        # Отдельное поле для эмбеддинга: заголовок + ключевые слова + текст.
+        # build_index берёт именно его, если оно есть.
+        "embed_text": f"{title}. {keywords_text}. {text}".strip(),
+        "topic": topic,
+        "id": entry.get("id", ""),
+        "source": source_file,
+    }
 
 
-def chunk_knowledge_base(kb: dict) -> list[dict]:
-    """Рекурсивно обходит knowledge_base.json, возвращает список чанков в
-    формате [{"question": "путь.до.поля", "answer": "текст"}, ...] — тот же
-    формат {"question", "answer"}, что и элементы faqs.json (см.
-    build_index.py/rag_index.py), чтобы переиспользовать существующую
-    инфраструктуру эмбеддинга/поиска без дублирования.
+def load_and_chunk(kb_dir: str) -> list[dict]:
+    """Читает все *.json из папки базы знаний и возвращает список чанков.
 
-    "question" — путь в структуре (например
-    "vacancies.montazhnik.salary") — это НЕ вопрос в человеческом смысле, а
-    заголовок чанка для контекста при показе/логировании; сам текстовый
-    поиск (embed_texts в build_index.py) использует и question, и answer
-    вместе, так что путь тоже участвует в сопоставлении с вопросом
-    кандидата, просто не как основной сигнал.
-    """
+    Файлы читаются в алфавитном порядке — чтобы состав и порядок чанков не
+    зависели от порядка обхода файловой системы. Это важно: порядок влияет
+    на номера в метаданных индекса, а значит на воспроизводимость сборки.
+
+    Битый JSON пропускается с предупреждением, а не роняет сборку: одна
+    опечатка в одном тематическом файле не должна оставлять бота вообще без
+    базы знаний."""
     chunks = []
+    for path in sorted(glob.glob(os.path.join(kb_dir, "*.json"))):
+        name = os.path.basename(path)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[kb] Пропускаю {name}: не удалось прочитать ({e}).")
+            continue
 
-    def walk(node, path: str):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if not path and key in _IGNORED_TOP_LEVEL_KEYS:
-                    continue
-                new_path = f"{path}.{key}" if path else key
-                walk(value, new_path)
-        else:
-            text = _stringify_leaf(node)
-            if text.strip():
-                chunks.append({"question": path, "answer": text})
-            # Пустая строка — не добавляем чанк вообще (не несёт пользы для
-            # поиска), но это не ошибка данных, поэтому не логируем как проблему.
+        topic = str(doc.get("topic", "")).strip() or name
+        entries = doc.get("entries")
+        if not isinstance(entries, list):
+            print(f"[kb] Пропускаю {name}: нет списка \"entries\".")
+            continue
 
-    walk(kb, "")
+        added = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            chunk = _entry_to_chunk(entry, topic, name)
+            if chunk:
+                chunks.append(chunk)
+                added += 1
+        print(f"[kb] {name}: {added} записей (тема: {topic})")
+
     return chunks
 
 
-def load_and_chunk(path: str) -> list[dict]:
-    with open(path, "r", encoding="utf-8") as f:
-        kb = json.load(f)
-    return chunk_knowledge_base(kb)
+def kb_files(kb_dir: str) -> list[str]:
+    """Пути всех файлов базы знаний — нужны build_index.py для подсчёта
+    хеша, по которому решается, пересобирать индекс или нет."""
+    return sorted(glob.glob(os.path.join(kb_dir, "*.json")))

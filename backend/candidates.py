@@ -8,12 +8,18 @@ from datetime import datetime
 from . import logger
 from . import paths
 from .crypto_utils import decrypt_bytes, encrypt_bytes
-from .validators import FieldValidationError, validate_field
+from .filelock import cross_process_lock
+from .validators import validate_field
 
 CANDIDATS_DIR = paths.CANDIDATS_DIR
 CANDIDATES_PATH = os.path.join(CANDIDATS_DIR, "candidates.csv")
 SESSIONS_PATH = os.path.join(CANDIDATS_DIR, "candidate_sessions.json")
 
+# threading.Lock защищает от одновременной записи РАЗНЫХ ПОТОКОВ одного
+# процесса (Telegram-бот обслуживает кандидатов параллельно через
+# asyncio.to_thread). Между ПРОЦЕССАМИ он бесполезен, а сайт и бот — это два
+# отдельных процесса ОС (см. run_all.py), поэтому дополнительно берётся
+# блокировка средствами ОС: cross_process_lock из backend/filelock.py.
 _lock = threading.Lock()
 
 FIELD_ORDER = [
@@ -151,8 +157,25 @@ def _save_table(fields: list, candidates: dict):
     os.replace(tmp_path, CANDIDATES_PATH)  # атомарная замена — не оставит файл в битом состоянии при сбое
 
 
-def get_or_create_candidate(source: str, external_id: str) -> str:
+def find_candidate(source: str, external_id: str) -> str | None:
+    """ID уже существующей карточки кандидата, либо None, если её ещё нет.
+
+    В отличие от get_or_create_candidate НИЧЕГО не создаёт. Нужна потому, что
+    карточка теперь заводится только в момент согласия по 152-ФЗ (см.
+    assistant._handle_anketa_turn), а до этого бот должен спокойно вести
+    обычный FAQ-диалог, не оставляя следов в таблице персональных данных."""
     with _lock:
+        sessions = _load_sessions()
+        return sessions.get(f"{source}:{external_id}")
+
+
+def get_or_create_candidate(source: str, external_id: str) -> str:
+    """Возвращает ID карточки, создавая её при необходимости.
+
+    Вызывается ТОЛЬКО после явного согласия кандидата по 152-ФЗ — раньше
+    вызывалась на каждое входящее сообщение, из-за чего таблица зарастала
+    пустыми карточками случайных посетителей сайта."""
+    with _lock, cross_process_lock(CANDIDATES_PATH):
         sessions = _load_sessions()
         key = f"{source}:{external_id}"
 
@@ -179,9 +202,12 @@ def get_or_create_candidate(source: str, external_id: str) -> str:
 def set_field(candidate_id: str, field_name: str, value: str) -> bool:
     """Сохраняет значение поля после валидации формата.
 
-    Бросает FieldValidationError, если значение не проходит проверку формата
-    (вызывающий код — assistant._process_markers — ловит её и мягко просит
-    кандидата уточнить значение, ничего не сохраняя)."""
+    Бросает FieldValidationError, если значение не проходит проверку формата.
+    На практике до этого не доходит: значения приходят из
+    anketa.process_answer, которая вызывает validate_field раньше и сама
+    показывает кандидату дружелюбный текст ошибки. Проверка здесь оставлена
+    как последний рубеж на случай записи в обход анкеты (например из
+    scripts/)."""
     real_field = normalize_field_name(field_name)
     if real_field is None:
         print(f"[candidates] Неизвестное поле от модели: '{field_name}' — игнорирую.")
@@ -192,7 +218,7 @@ def set_field(candidate_id: str, field_name: str, value: str) -> bool:
     if real_field not in _SERVICE_FIELDS:
         value = validate_field(real_field, value)
 
-    with _lock:
+    with _lock, cross_process_lock(CANDIDATES_PATH):
         fields, candidates = _load_table()
         if candidate_id not in candidates:
             return False
@@ -237,18 +263,12 @@ def is_card_complete(candidate_id: str) -> bool:
     return all(card.get(field, "").strip() for field in REQUIRED_CANDIDATE_FIELDS)
 
 
-def missing_fields(candidate_id: str) -> list:
-    """Список полей анкеты, которые ещё не заполнены (полезно для логов/отладки)."""
-    card = get_card(candidate_id)
-    return [field for field in REQUIRED_CANDIDATE_FIELDS if not card.get(field, "").strip()]
-
-
 def delete_candidate(candidate_id: str) -> dict:
     """Полное удаление данных кандидата по его запросу (право на удаление, 152-ФЗ).
 
     Удаляет: строку кандидата из candidates.csv, его запись(и) в
     candidate_sessions.json (маппинг source:external_id -> candidate_id),
-    файл(ы) истории переписки data*/conversations и строки в logs.csv,
+    файл(ы) истории переписки в history/ и строки в logs.csv,
     соответствующие найденным сессиям этого кандидата.
 
     Логи удаляются ОТДЕЛЬНО от истории переписки (logger.delete_logs_for_session,
@@ -263,7 +283,7 @@ def delete_candidate(candidate_id: str) -> dict:
 
     Возвращает словарь с тем, что реально было удалено — полезно для лога/ответа HR.
     """
-    with _lock:
+    with _lock, cross_process_lock(CANDIDATES_PATH):
         fields, candidates = _load_table()
         existed_in_table = candidate_id in candidates
         if existed_in_table:

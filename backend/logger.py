@@ -1,4 +1,3 @@
-import base64
 import csv
 import os
 import threading
@@ -15,8 +14,10 @@ from . import paths
 # удаление (см. candidates.delete_candidate) — логи без срока хранения были
 # бы несогласованным исключением из того же принципа. Решение: старые
 # строки удаляются автоматически при каждом запуске сервера (см.
-# purge_old_logs ниже, вызывается из run_all.py/start.sh и из app.py при
-# импорте — см. app.py) — без отдельного cron/планировщика, чтобы работать
+# purge_old_logs ниже, вызывается из run_all.py и из start.sh при старте;
+# из app.py она НЕ вызывается, вопреки прежней редакции этого комментария —
+# uvicorn можно запустить и напрямую, тогда очистка не произойдёт вовсе,
+# см. README) — без отдельного cron/планировщика, чтобы работать
 # при запуске одной командой.
 #
 # LOGS_RETENTION_DAYS в .env — сколько дней хранить строку лога с момента её
@@ -177,41 +178,13 @@ def log_interaction(source: str, external_id: str, query: str, response: str,
             writer.writerow(row)
 
 
-def read_logs(decrypt: bool = True) -> list:
-    """Читает logs.csv целиком и возвращает список строк (список словарей,
-    как csv.DictReader). При decrypt=True (по умолчанию) расшифровывает
-    "Вопрос"/"Ответ" на лету для каждой строки — требует ENCRYPTION_KEY в
-    окружении (см. crypto_utils.py), иначе поднимет
-    crypto_utils.EncryptionKeyMissing. При decrypt=False возвращает эти два
-    поля как есть, зашифрованными — например, для случаев, когда нужен
-    только список ID пользователей/дат без доступа к содержимому переписки.
-
-    Не предназначено для использования на каждый чих в горячем пути
-    (log_interaction/purge_old_logs напрямую работают с файлом построчно) —
-    это точка входа для ручного/административного просмотра логов, см.
-    scripts/ и README, раздел про логи."""
-    if not os.path.exists(LOG_PATH):
-        return []
-
-    with open(LOG_PATH, "r", newline="", encoding="utf-8-sig") as f:
-        rows = list(csv.DictReader(f))
-
-    if not decrypt:
-        return rows
-
-    for row in rows:
-        for field in _ENCRYPTED_FIELDS:
-            if field in row:
-                row[field] = _decrypt_field(row[field])
-    return rows
-
-
 def purge_old_logs():
     """Удаляет из logs.csv строки старше LOGS_RETENTION_DAYS дней. Вызывается
-    при старте (run_all.py/start.sh, а также при импорте app.py — см. там)
-    — не бесконечный фоновый процесс, а простая проверка на каждом запуске,
-    этого достаточно для локального сервера, который перезапускается не
-    реже раза в LOGS_RETENTION_DAYS дней в обычной эксплуатации.
+    при старте: из run_all.py и из start.sh (Docker). При прямом запуске
+    uvicorn backend.app:app очистка не выполняется, app.py её не вызывает.
+    Это не бесконечный фоновый процесс, а простая проверка на каждом
+    запуске — этого достаточно для локального сервера, который
+    перезапускается не реже раза в LOGS_RETENTION_DAYS дней.
 
     Работает НЕ расшифровывая "Вопрос"/"Ответ" — сравнение идёт только по
     полю "Дата и время" (открытый текст), удаление/сохранение строки не

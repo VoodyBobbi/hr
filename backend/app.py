@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
@@ -111,6 +111,58 @@ app.state.limiter = limiter
 SESSION_COOKIE_NAME = "session_id"
 SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # год — анкету можно дозаполнить и через полгода
 
+# --- SameSite и Secure: теперь настраиваются, а не зашиты в код -----------
+#
+# SameSite=Lax (значение по умолчанию) правильно ровно до тех пор, пока чат
+# живёт на том же домене, что и сервер. Если виджет встроить на сайт компании,
+# а бота держать на отдельном домене или поддомене, запрос к /chat становится
+# cross-site, браузер cookie с Lax к нему НЕ приложит, и каждое сообщение
+# начнёт новую сессию: диалог не помнится, анкета начинается заново.
+#
+# Для такого размещения нужен SameSite=None, и тогда браузер ТРЕБУЕТ Secure —
+# поэтому ниже он включается принудительно, что бы ни стояло в .env.
+#
+# SESSION_COOKIE_SECURE=false существует ровно для одного случая: локальная
+# проверка по http://localhost без сертификата (в том числе docker compose up,
+# который поднимает сайт именно по http). В любом сетевом развёртывании
+# оставляйте true: cookie в открытом HTTP-трафике перехватывается в той же
+# сети, и чужой человек продолжит диалог от имени кандидата.
+SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "lax").strip().lower()
+if SESSION_COOKIE_SAMESITE not in ("lax", "strict", "none"):
+    print(
+        f"[app] SESSION_COOKIE_SAMESITE={SESSION_COOKIE_SAMESITE!r} — недопустимое "
+        f"значение (ожидается lax, strict или none). Использую lax."
+    )
+    SESSION_COOKIE_SAMESITE = "lax"
+
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "true").strip().lower() not in ("0", "false", "no")
+
+if SESSION_COOKIE_SAMESITE == "none" and not SESSION_COOKIE_SECURE:
+    print("[app] SameSite=None требует Secure — включаю Secure принудительно.")
+    SESSION_COOKIE_SECURE = True
+
+if not SESSION_COOKIE_SECURE:
+    print(
+        "[app] ВНИМАНИЕ: cookie сессии выдаётся БЕЗ флага Secure "
+        "(SESSION_COOKIE_SECURE=false). Это допустимо только для локальной "
+        "проверки по http://localhost. Для любого сетевого развёртывания "
+        "верните true и поднимайте сайт по HTTPS."
+    )
+
+
+def _set_session_cookie(response: Response, session_id: str) -> None:
+    """Одно место выдачи cookie — раньше set_cookie вызывался в двух ветках
+    /chat с продублированными параметрами, и любая правка требовала не забыть
+    про обе."""
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=session_id,
+        max_age=SESSION_COOKIE_MAX_AGE,
+        httponly=True,
+        samesite=SESSION_COOKIE_SAMESITE,
+        secure=SESSION_COOKIE_SECURE,
+    )
+
 
 @app.exception_handler(RateLimitExceeded)
 def rate_limit_handler(request: Request, exc: RateLimitExceeded):
@@ -177,13 +229,21 @@ def chat(request: Request, response: Response, body: ChatRequest,
     # дополняет лимит slowapi выше (тот просто считает число запросов в
     # минуту с IP, не заботясь об их содержании). Проверяется ДО get_answer,
     # чтобы заблокированный кандидат не тратил впустую вызов GigaChat.
-    is_blocked_now, _ = rate_limiting.is_blocked("site", session_id)
+    #
+    # Ключ — IP-адрес, а НЕ session_id. Раньше ключом была сессия, а сессию
+    # выдаёт сам сервер при каждом запросе без cookie: скрипту достаточно было
+    # не хранить cookie, чтобы на каждое сообщение получать чистый счётчик,
+    # и вся балльная защита сайта не работала вообще. IP берётся той же
+    # функцией get_remote_address, что использует slowapi, — если сайт стоит
+    # за обратным прокси, настройте прокси на передачу реального адреса
+    # (X-Forwarded-For) и запускайте uvicorn с --proxy-headers, иначе все
+    # посетители будут выглядеть одним адресом.
+    client_key = get_remote_address(request)
+
+    is_blocked_now, _ = rate_limiting.is_blocked("site", client_key)
     if is_blocked_now:
         if is_new_session:
-            response.set_cookie(
-                key=SESSION_COOKIE_NAME, value=session_id, max_age=SESSION_COOKIE_MAX_AGE,
-                httponly=True, samesite="lax", secure=True,
-            )
+            _set_session_cookie(response, session_id)
         return ChatResponse(
             answer=(
                 "Вы отправляете сообщения слишком часто — пожалуйста, "
@@ -192,7 +252,7 @@ def chat(request: Request, response: Response, body: ChatRequest,
             context=[],
             session_id=session_id,
         )
-    rate_limiting.record_message("site", session_id, body.message)
+    rate_limiting.record_message("site", client_key, body.message)
 
     answer, similar_items = get_answer(
         body.message,
@@ -202,14 +262,7 @@ def chat(request: Request, response: Response, body: ChatRequest,
     )
 
     if is_new_session:
-        response.set_cookie(
-            key=SESSION_COOKIE_NAME,
-            value=session_id,
-            max_age=SESSION_COOKIE_MAX_AGE,
-            httponly=True,
-            samesite="lax",
-            secure=True,
-        )
+        _set_session_cookie(response, session_id)
 
     return ChatResponse(answer=answer, context=list(similar_items), session_id=session_id)
 

@@ -14,6 +14,47 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set. Please set it in your .env file.")
 
+# Жёсткий предел Telegram Bot API на одно текстовое сообщение. Отправка
+# длиннее приводит к ошибке "Message is too long", и кандидат не получает
+# ответ ВООБЩЕ. Реально в этот предел упираются готовая карточка анкеты из
+# 29 полей (anketa.format_card_for_confirmation) и длинные ответы GigaChat.
+TELEGRAM_MESSAGE_LIMIT = 4096
+
+
+def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list:
+    """Режет длинный ответ на части, влезающие в одно сообщение Telegram.
+
+    Режет по границам: сначала пробует разделить по пустой строке, затем по
+    переводу строки, и только если и это не помогло (одна строка длиннее
+    лимита) — по живому. Это важно для карточки анкеты: разрыв посередине
+    строки "СНИЛС: 123..." выглядит как потерянные данные."""
+    if len(text) <= limit:
+        return [text]
+
+    parts = []
+    remaining = text
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        cut = window.rfind("\n\n")
+        if cut < limit // 2:
+            cut = window.rfind("\n")
+        if cut < limit // 2:
+            cut = window.rfind(" ")
+        if cut <= 0:
+            cut = limit
+        parts.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
+async def reply_long(update: Update, text: str) -> None:
+    """reply_text с учётом лимита длины: отправляет ответ одним или
+    несколькими сообщениями подряд."""
+    for part in split_message(text):
+        await update.message.reply_text(part)
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -72,14 +113,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "свяжитесь с менеджером напрямую."
         )
 
-    await update.message.reply_text(answer)
+    await reply_long(update, answer)
 
 
 def main():
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # filters.ChatType.PRIVATE — только личные сообщения кандидатов.
+    #
+    # Без этого фильтра бот отвечал в ЛЮБОМ чате, куда его добавили, включая
+    # HR-группу для уведомлений о новых заявках (backend/notifications.py).
+    # Каждая реплика рекрутёров в этой группе воспринималась как сообщение
+    # кандидата: бот отвечал на неё в группе и заводил "анкету" на chat_id
+    # самой группы вместо живого человека.
+    #
+    # Тот же фильтр стоит и на /start: команда в группе больше не вызывает
+    # приветствие, адресованное кандидату.
+    application.add_handler(
+        CommandHandler("start", start_command, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+            handle_message,
+        )
+    )
 
     print("Telegram bot started. Press Ctrl+C to stop.")
     application.run_polling()

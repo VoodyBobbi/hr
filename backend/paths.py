@@ -11,23 +11,27 @@
 не подхватывает, при `git push` они никогда не уходят на GitHub. Улетает
 только код, сами данные остаются исключительно на диске пользователя.
 
-По умолчанию (без HR_DATA_DIR):
-- `candidates/` и `logs/` — на верхнем уровне папки проекта, рядом с
-  `backend/`, `data/`, а не спрятаны во вложенной папке — чтобы HR сразу
-  видел рабочую таблицу кандидатов и файл логов, не проваливаясь в
-  подпапки. И то, и другое — то, во что HR регулярно заглядывает руками.
-- `conversations/` (историю переписки — во внутреннюю логику бота никто
-  вручную не заглядывает) остаётся в `HR/conversations/` — как раньше.
+По умолчанию (без HR_DATA_DIR) все три папки лежат НА ВЕРХНЕМ УРОВНЕ папки
+проекта, рядом с `backend/` и `data/`, без промежуточной папки `HR/`:
+
+    candidates/   анкеты кандидатов (candidates.csv, candidate_sessions.json)
+    logs/         лог обращений (logs.csv)
+    history/      история переписки, по одному файлу на диалог
+
+Раньше история переписки лежала в `HR/conversations/`, из-за чего путь на
+диске выглядел как `.../HR/HR/conversations`: папка проекта называется HR, и
+программа создавала внутри неё ещё одну служебную папку HR. Теперь такой
+вложенности нет вообще — `HR/` не создаётся, а старое содержимое
+переносится автоматически при первом запуске (см. _migrate_legacy_dir ниже).
 
 Расположение можно переопределить переменной окружения HR_DATA_DIR (в .env
 или в переменных окружения ОС), если нужно хранить ВСЕ персональные данные
-(включая candidates/ и logs/) в одном месте вне папки проекта — например,
-на общем сетевом диске. Если HR_DATA_DIR задан, он имеет приоритет для
-всех трёх папок, и верхнеуровневое расположение candidates/ и logs/,
-описанное выше, не используется.
+в одном месте вне папки проекта — например, на общем сетевом диске. Если
+HR_DATA_DIR задан, он имеет приоритет для всех трёх папок, и верхнеуровневое
+расположение, описанное выше, не используется.
 
 Папка с "мозгами" бота (data/faqs.json, data/system_prompt.md,
-data/knowledge_base.json, поисковый индекс) — это часть кода/конфигурации,
+data/kb/, поисковый индекс) — это часть кода/конфигурации,
 не персональные данные, поэтому она никуда не переезжает и остаётся в
 репозитории как раньше.
 """
@@ -48,20 +52,19 @@ load_dotenv()
 # т.д.) — родитель папки backend/, где лежит этот файл.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Явно заданный HR_DATA_DIR имеет приоритет и переносит ВСЕ три папки в
-# указанное место (см. докстринг выше). Без него — только conversations/
-# идёт в HR/ внутри проекта; candidates/ и logs/ живут на верхнем уровне.
+# Явно заданный HR_DATA_DIR переносит все три папки в указанное место
+# (см. докстринг выше). Без него — все три на верхнем уровне проекта.
 _hr_data_dir_override = os.environ.get("HR_DATA_DIR")
-DATA_ROOT = os.path.abspath(_hr_data_dir_override or os.path.join(PROJECT_ROOT, "HR"))
+DATA_ROOT = os.path.abspath(_hr_data_dir_override or PROJECT_ROOT)
 
-if _hr_data_dir_override:
-    CANDIDATS_DIR = os.path.join(DATA_ROOT, "candidates")
-    LOGS_DIR = os.path.join(DATA_ROOT, "logs")
-else:
-    CANDIDATS_DIR = os.path.join(PROJECT_ROOT, "candidates")
-    LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
+CANDIDATS_DIR = os.path.join(DATA_ROOT, "candidates")
+LOGS_DIR = os.path.join(DATA_ROOT, "logs")
+HISTORY_DIR = os.path.join(DATA_ROOT, "history")
 
-CONVERSATIONS_DIR = os.path.join(DATA_ROOT, "conversations")
+# Старое имя переменной оставлено псевдонимом, чтобы не сломать внешние
+# скрипты администратора, которые могли на него ссылаться. Внутри проекта
+# везде используется HISTORY_DIR.
+CONVERSATIONS_DIR = HISTORY_DIR
 
 
 def _ensure_private_dir(path: str) -> None:
@@ -79,13 +82,12 @@ def _ensure_private_dir(path: str) -> None:
 
 
 def _migrate_legacy_dir(old_path: str, new_path: str, label: str) -> None:
-    """Разовый перенос данных со старого расположения (candidates/ и logs/
-    вложенными в HR/) на новое верхнеуровневое, при обновлении с версии, где
-    HR_DATA_DIR не был задан. Переносит, только если старая папка есть, а
-    новая — ещё нет (значит, перенос ещё не выполнялся, и новых данных,
-    которые было бы страшно перезаписать, на новом месте ещё нет). Если и
-    старая, и новая папки существуют — не трогает ничего: разрешать
-    расхождение руками безопаснее, чем угадывать, что можно перезаписать.
+    """Разовый перенос данных со старого расположения на новое при обновлении
+    проекта. Переносит, только если старая папка есть, а новая — ещё нет
+    (значит, перенос ещё не выполнялся, и новых данных, которые было бы
+    страшно перезаписать, на новом месте ещё нет). Если и старая, и новая
+    папки существуют — не трогает ничего: разрешать расхождение руками
+    безопаснее, чем угадывать, что можно перезаписать.
 
     Обёрнуто в try/except: сайт и Telegram-бот запускаются как отдельные ОС
     процессы почти одновременно (run_all.py) и оба импортируют этот модуль
@@ -101,17 +103,33 @@ def _migrate_legacy_dir(old_path: str, new_path: str, label: str) -> None:
         except OSError as e:
             print(
                 f"[paths] {label}: не удалось перенести {old_path} -> {new_path} "
-                f"({e}). Перенесите вручную, либо задайте HR_DATA_DIR={os.path.dirname(old_path)!r} "
-                f"в .env, если хотите продолжать работать со старым расположением."
+                f"({e}). Перенесите папку вручную."
             )
 
 
+# Перенос со всех прежних расположений на новые. Для истории переписки
+# прежних мест было два (HR/conversations и совсем старое data/conversations)
+# — оба ведут в одну и ту же папку history/.
 if not _hr_data_dir_override:
     _migrate_legacy_dir(os.path.join(PROJECT_ROOT, "HR", "candidates"), CANDIDATS_DIR, "candidates")
     _migrate_legacy_dir(os.path.join(PROJECT_ROOT, "HR", "logs"), LOGS_DIR, "logs")
+    _migrate_legacy_dir(os.path.join(PROJECT_ROOT, "HR", "conversations"), HISTORY_DIR, "history")
+    _migrate_legacy_dir(os.path.join(PROJECT_ROOT, "data", "conversations"), HISTORY_DIR, "history")
+
+    # Если после переносов папка HR/ осталась пустой — убираем её совсем,
+    # чтобы не мозолила глаза при просмотре проекта. Непустую не трогаем:
+    # значит, внутри осталось что-то, о чём программа не знает, и решать,
+    # что с этим делать, должен человек, а не код.
+    _legacy_root = os.path.join(PROJECT_ROOT, "HR")
+    if os.path.isdir(_legacy_root):
+        try:
+            os.rmdir(_legacy_root)  # сработает, только если папка пуста
+            print(f"[paths] Пустая папка {_legacy_root} удалена — данные теперь в корне проекта.")
+        except OSError:
+            pass
 
 
-for _dir in (CANDIDATS_DIR, CONVERSATIONS_DIR, LOGS_DIR):
+for _dir in (CANDIDATS_DIR, HISTORY_DIR, LOGS_DIR):
     _ensure_private_dir(_dir)
 
 
@@ -123,4 +141,4 @@ def conversation_path(source: str, external_id: str) -> str:
     чтобы candidates.py не тянул за собой тяжёлые зависимости assistant.py
     (GigaChat, sentence-transformers) только ради построения пути."""
     safe_id = "".join(c if c.isalnum() else "_" for c in str(external_id))
-    return os.path.join(CONVERSATIONS_DIR, f"{source}_{safe_id}.json")
+    return os.path.join(HISTORY_DIR, f"{source}_{safe_id}.json")

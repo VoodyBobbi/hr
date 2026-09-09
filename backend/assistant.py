@@ -3,7 +3,6 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
 
 import numpy as np
 from dotenv import load_dotenv
@@ -25,7 +24,6 @@ from . import crypto_utils
 from . import logger
 from . import notifications
 from . import paths
-from .validators import FieldValidationError
 
 load_dotenv()
 
@@ -37,28 +35,64 @@ BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 INDEX_PATH = os.path.join(DATA_DIR, "faiss_index.bin")
 META_PATH = os.path.join(DATA_DIR, "faqs_metadata.npy")
-# Отдельный, второй FAISS-индекс для knowledge_base.json (см.
+# Отдельный, второй FAISS-индекс для базы знаний из data/kb/ (см.
 # backend/kb_chunker.py, backend/build_index.py) — раздельный от FAQ-индекса
 # выше по требованию "две раздельные поиска, не один общий top-3" (см.
 # обсуждение пункта про сжатие промпта/базы): вопрос кандидата ищется И в
 # faqs.json (готовые ответы, search-first — см. get_answer), И отдельно в
-# knowledge_base.json (факты для контекста GigaChat, если FAQ не нашёл
+# базы знаний (факты для контекста GigaChat, если FAQ не нашёл
 # готового ответа) — это два разных назначения, смешивать их в один общий
 # top-3 давало бы, например, что более релевантный FAQ-ответ может быть
 # вытеснен менее релевантным KB-фактом просто по случайному порядку.
 KB_INDEX_PATH = os.path.join(DATA_DIR, "kb_faiss_index.bin")
 KB_META_PATH = os.path.join(DATA_DIR, "kb_metadata.npy")
 AGENT_PROMPT_PATH = os.path.join(DATA_DIR, "system_prompt.md")
-KNOWLEDGE_BASE_PATH = os.path.join(DATA_DIR, "knowledge_base.json")
+KB_DIR = os.path.join(DATA_DIR, "kb")
 
 # История переписки — персональные данные кандидата, поэтому лежит ВНЕ
-# репозитория (папка на диске администратора, см. backend/paths.py), в
+# репозитория (папка history/ в корне проекта, см. backend/paths.py), в
 # отличие от базы знаний бота выше (FAQ/промпт — это конфигурация, не ПД).
-CONVERSATIONS_DIR = paths.CONVERSATIONS_DIR
+HISTORY_DIR = paths.HISTORY_DIR
 
 EMBEDDING_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 
-WATCHED_FILES = [AGENT_PROMPT_PATH, KNOWLEDGE_BASE_PATH, INDEX_PATH, META_PATH, KB_INDEX_PATH, KB_META_PATH]
+# --- Пороги близости для поиска ------------------------------------------
+#
+# Индекс — faiss.IndexFlatIP на нормализованных векторах, поэтому поиск
+# возвращает сразу КОСИНУСНУЮ БЛИЗОСТЬ: число от -1 до 1, где больше значит
+# похожее. 0.45 — «примерно об одном», 0.75 — «почти то же самое».
+#
+# Раньше индекс был IndexFlatL2 и возвращал квадрат расстояния (меньше значит
+# похожее, диапазон 0..4). Порог в таких единицах невозможно осмыслить на
+# глаз, и именно поэтому исходное значение было выставлено неверно.
+#
+# Пороги разные, потому что у поисков разное назначение:
+# FAQ_MIN_SIMILARITY — готовый ответ уходит кандидату НАПРЯМУЮ, без GigaChat,
+# поэтому порог строгий: ошибка здесь видна кандидату как уверенный ответ не
+# на его вопрос. KB_MIN_SIMILARITY — найденные факты только подмешиваются в
+# промпт, GigaChat всё равно решает, что из них использовать, поэтому здесь
+# лишний факт дешевле пропущенного.
+#
+# Оба значения выносятся в .env, чтобы калибровать их по реальным логам без
+# правки кода (см. README, раздел «Калибровка порогов поиска»).
+FAQ_MIN_SIMILARITY = float(os.getenv("FAQ_MIN_SIMILARITY", "0.62"))
+KB_MIN_SIMILARITY = float(os.getenv("KB_MIN_SIMILARITY", "0.35"))
+
+# Сколько фактов из базы знаний максимум уходит в промпт и какой длины.
+# Ограничение нужно ради предсказуемости расходов: без него редкий вопрос,
+# зацепивший много длинных чанков, раздувал бы промпт в разы. Символы, а не
+# токены — точный подсчёт токенов требовал бы токенизатора GigaChat, которого
+# у нас нет, а порядок величины отражается верно (для русского текста грубо
+# 2-3 символа на токен).
+KB_TOP_K = int(os.getenv("KB_TOP_K", "5"))
+KB_CONTEXT_CHAR_LIMIT = int(os.getenv("KB_CONTEXT_CHAR_LIMIT", "2500"))
+
+# Файлы, чьё время изменения проверяется на каждом запросе (_ensure_fresh):
+# правка любого из них подхватывается на лету, без перезапуска сервера.
+# Сама папка kb/ сюда не входит — её содержимое участвует через свой индекс
+# (kb_faiss_index.bin), который пересобирается build_index.py; отслеживать
+# ещё и исходные json-файлы значило бы дублировать эту проверку.
+WATCHED_FILES = [AGENT_PROMPT_PATH, INDEX_PATH, META_PATH, KB_INDEX_PATH, KB_META_PATH]
 
 MAX_HISTORY_MESSAGES = 20
 
@@ -68,7 +102,6 @@ _state_lock = threading.RLock()
 _state = {
     "mtimes": {},
     "agent_prompt": "",
-    "knowledge_base": {},
     "index": None,
     "metadata": None,
 }
@@ -83,63 +116,69 @@ def _get_mtimes() -> dict:
     }
 
 
-# _build_vacancy_summary/_detect_vacancy_key/_VACANCY_KEYWORDS — старая
-# эвристическая логика выбора релевантной вакансии для промпта, полностью
-# заменена отдельным KB-поиском по всей базе знаний (см.
-# backend/kb_chunker.py, _build_system_prompt выше) — специальная
-# обработка именно раздела vacancies больше не нужна: любой вопрос,
-# включая про конкретную вакансию, находит релевантные факты через общий
-# механизм поиска, не только про vacancies.
+def _format_kb_context(kb_chunks: list | None) -> str:
+    """Найденные факты в текст для промпта, с ограничением объёма.
+
+    Обрезка по KB_CONTEXT_CHAR_LIMIT нужна для предсказуемости расходов:
+    без неё удачно сформулированный вопрос, зацепивший пять длинных чанков
+    (перечень регионов, список противопоказаний), раздувал бы промпт в разы
+    против обычного. Чанки отсортированы поиском по убыванию близости,
+    поэтому обрезается всегда наименее релевантный хвост.
+
+    В промпт идут только заголовок и текст. Ключевые слова, по которым чанк
+    нашёлся, остаются в индексе — модели они не нужны и только тратили бы
+    токены (см. backend/kb_chunker.py)."""
+    if not kb_chunks:
+        return ""
+
+    lines = []
+    used = 0
+    for chunk in kb_chunks:
+        line = f"- {chunk['question']}: {chunk['answer']}"
+        if used + len(line) > KB_CONTEXT_CHAR_LIMIT and lines:
+            break
+        lines.append(line)
+        used += len(line)
+    return "\n".join(lines)
 
 
-def _build_system_prompt(
-    agent_prompt: str,
-    knowledge_base: dict,
-    kb_chunks: list | None = None,
-) -> str:
+def _build_system_prompt(agent_prompt: str, kb_chunks: list | None = None) -> str:
     """Собирает системный промпт под конкретный вопрос кандидата.
 
-    Раньше вся knowledge_base.json (кроме специально обработанного раздела
-    vacancies) грузилась в промпт ЦЕЛИКОМ на каждом запросе — независимо от
-    того, что реально спросил кандидат. Теперь: только базовая сводка о
-    компании (название, вакансии — дёшево по токенам, нужно почти в любом
-    диалоге) плюс kb_chunks — несколько фрагментов knowledge_base.json,
-    найденных ОТДЕЛЬНЫМ поиском по вопросу кандидата (см. get_answer,
-    backend/kb_chunker.py, backend/build_index.py — knowledge_base
-    индексируется отдельно от faqs.json, с отдельным поиском, а не
-    смешивается в один общий top-3). Не найдено ни одного релевантного
-    чанка (kb_chunks пустой/None) — секция ниже просто не появляется в
-    промпте, вместо пустого JSON-блока, как было раньше."""
-    company = knowledge_base.get("company", {})
-    vacancies = knowledge_base.get("vacancies", {})
-    vacancy_titles = ", ".join(v.get("title", k) for k, v in vacancies.items())
+    Промпт состоит из двух частей, и разделение между ними принципиальное:
 
-    knowledge_summary = (
-        f"\n\n## Компания\n"
-        f"Название: {company.get('name', '')}\n"
-        f"Описание: {company.get('description', '')}\n"
-        f"Вакансии: {vacancy_titles}\n"
+    1. agent_prompt (data/system_prompt.md) — ТОЛЬКО правила поведения: роль,
+       тон, длина ответа, запреты, маркер начала анкеты. Никаких фактов о
+       компании. Эта часть неизменна и уходит в каждый запрос.
+    2. Факты, найденные ПО ВОПРОСУ кандидата в базе знаний — несколько
+       коротких фрагментов из data/kb/, отобранных отдельным векторным
+       поиском (см. get_answer и backend/kb_chunker.py).
+
+    Раньше факты жили прямо в system_prompt.md: полный перечень условий,
+    зарплат, нормативов и адресов уходил в GigaChat при каждом сообщении,
+    включая «здравствуйте». Сейчас неизменная часть содержит только правила,
+    а конкретика приезжает адресно — под заданный вопрос.
+
+    Если релевантных фактов не нашлось, секция просто не появляется. Модель
+    в этом случае обязана сказать, что информации нет, и предложить уточнить
+    у менеджера — это прописано в system_prompt.md."""
+    context = _format_kb_context(kb_chunks)
+    if not context:
+        return agent_prompt
+
+    return (
+        f"{agent_prompt}\n\n"
+        f"## Факты из базы знаний по вопросу кандидата\n"
+        f"{context}\n\n"
+        f"Отвечай только на основании этих фактов. Не добавляй цифры, сроки и "
+        f"условия, которых здесь нет. Если для ответа данных не хватает — скажи "
+        f"об этом прямо и предложи уточнить у менеджера."
     )
-
-    if kb_chunks:
-        chunks_text = "\n".join(f"- {c['question']}: {c['answer']}" for c in kb_chunks)
-        knowledge_summary += (
-            f"\n## Найденные по вопросу кандидата факты из базы знаний\n"
-            f"{chunks_text}\n"
-            f"\nИспользуй эти факты как источник, не выдумывай детали сверх них. Если для "
-            f"вопроса кандидата здесь не хватает данных — честно скажи, что уточнишь, "
-            f"вместо того чтобы придумывать правдоподобный ответ."
-        )
-
-    return agent_prompt + knowledge_summary
 
 
 def _reload_all_locked():
     with open(AGENT_PROMPT_PATH, "r", encoding="utf-8") as f:
         agent_prompt = f.read().strip()
-
-    with open(KNOWLEDGE_BASE_PATH, "r", encoding="utf-8") as f:
-        knowledge_base = json.load(f)
 
     new_index, new_metadata = load_index(INDEX_PATH, META_PATH)
 
@@ -163,7 +202,7 @@ def _reload_all_locked():
             "знаний временно отключён, отвечает только FAQ-поиск/GigaChat."
         )
 
-    # Кешируем СЫРЫЕ agent_prompt/knowledge_base, а не готовую строку
+    # Кешируем СЫРОЙ agent_prompt, а не готовую строку
     # системного промпта — сам промпт теперь собирается заново под каждого
     # конкретного кандидата в get_answer() (см. _build_system_prompt), в
     # зависимости от того, какая вакансия ему уже известна/интересна. Чтение
@@ -171,7 +210,6 @@ def _reload_all_locked():
     # смысл кешировать между запросами; сама сборка строки промпта из уже
     # распарсенного словаря — дёшево, её можно делать каждый раз.
     _state["agent_prompt"] = agent_prompt
-    _state["knowledge_base"] = knowledge_base
     _state["index"] = new_index
     _state["metadata"] = new_metadata
     _state["kb_index"] = new_kb_index
@@ -193,7 +231,23 @@ with _state_lock:
 
 
 def embed_text(text: str) -> np.ndarray:
-    vector = embedding_model.encode([text], convert_to_numpy=True)
+    """Вектор вопроса кандидата для поиска в FAISS.
+
+    normalize_embeddings=True обязателен и ДОЛЖЕН совпадать с тем, как
+    строился индекс (build_index.py). У sentence-transformers значение по
+    умолчанию — False, и раньше нормализации не было ни здесь, ни при сборке
+    индекса: длины векторов этой модели заметно больше единицы, поэтому
+    квадрат расстояния между двумя даже близкими по смыслу вопросами
+    оказывался в разы выше порога 1.0, search_similar почти всегда возвращал
+    пустой список, и вся экономия на search-first не работала — каждое
+    сообщение уходило в GigaChat. После нормализации длина вектора равна 1, и
+    порог получает понятный смысл через косинусную близость (см. комментарий
+    у FAQ_MIN_SIMILARITY выше).
+
+    ВАЖНО: менять этот флаг в одиночку нельзя — индекс и запрос должны
+    строиться одинаково. При изменении поднимите EMBEDDING_VERSION в
+    build_index.py, чтобы индекс гарантированно пересобрался."""
+    vector = embedding_model.encode([text], convert_to_numpy=True, normalize_embeddings=True)
     return vector.astype("float32")
 
 
@@ -341,9 +395,9 @@ def _process_markers(raw_text: str) -> tuple[str, bool]:
     return clean_text, anketa_requested
 
 
-def _handle_anketa_turn(candidate_id: str, source: str, external_id: str,
-                         user_message: str, last_bot_message: str,
-                         anketa_start_requested: bool = False):
+def _handle_anketa_turn(source: str, external_id: str,
+                        user_message: str, last_bot_message: str,
+                        anketa_start_requested: bool = False):
     """Обрабатывает один ход диалога в рамках анкеты — согласие 152-ФЗ,
     сбор 29 полей, подтверждение готовой карточки, команду удаления.
 
@@ -356,22 +410,29 @@ def _handle_anketa_turn(candidate_id: str, source: str, external_id: str,
     минуя обычный FAQ-диалог, для которого GigaChat как раз и нужна.
 
     Возвращает готовый текст ответа кандидату, если сообщение было
-    обработано анкетной веткой (кандидат либо только что согласился начать
-    анкету, либо уже находится в процессе её заполнения) — в этом случае
-    GigaChat НЕ вызывается вообще для ЭТОГО хода, вызывающий код
-    (get_answer) сразу отдаёт этот текст.
+    обработано анкетной веткой — в этом случае GigaChat НЕ вызывается вообще
+    для ЭТОГО хода, вызывающий код (get_answer) сразу отдаёт этот текст.
 
     Возвращает None, если анкетная ветка кандидата не касается — согласие
     ещё не запрошено (обычный диалог продолжается через GigaChat) либо уже
-    дано и карточка уже подтверждена (тоже обычный диалог) — тогда
-    get_answer продолжает свой обычный путь ниже.
+    дано и карточка уже подтверждена (тоже обычный диалог).
+
+    Принимает source/external_id, а не готовый candidate_id: карточка
+    кандидата теперь СОЗДАЁТСЯ ТОЛЬКО В МОМЕНТ СОГЛАСИЯ по 152-ФЗ, а не при
+    первом же сообщении. Раньше get_answer заводил строку в candidates.csv
+    любому, кто написал боту хоть слово, — таблица зарастала пустыми
+    карточками случайных посетителей, а с точки зрения 152-ФЗ это был сбор
+    данных до получения согласия.
     """
+    candidate_id = candidates.find_candidate(source, external_id)
+    law_given = bool(candidate_id) and candidates.is_law_acknowledged(candidate_id)
+
     # Ждём подтверждения удаления: ПРЕДЫДУЩИМ ответом бота было именно
     # предупреждение об удалении (DELETE_CONFIRMATION_PROMPT) — значит
     # сейчас кандидат либо подтверждает, либо нет. Проверяется в первую
     # очередь, до всего остального: команда удаления имеет приоритет над
     # обычным ходом анкеты на любом её шаге.
-    if last_bot_message == anketa.DELETE_CONFIRMATION_PROMPT:
+    if candidate_id and last_bot_message.endswith(anketa.DELETE_CONFIRMATION_PROMPT):
         if anketa.is_delete_confirmed(user_message):
             candidates.delete_candidate(candidate_id)
             return anketa.DELETE_DONE_MESSAGE
@@ -390,38 +451,60 @@ def _handle_anketa_turn(candidate_id: str, source: str, external_id: str,
 
     # Команда удаления может прозвучать на любом шаге анкеты (кандидат
     # передумал на середине заполнения) — проверяется до состояний ниже.
-    # Условие ниже: согласие уже дано (иначе анкеты как таковой ещё нет,
-    # удалять пока нечего — это отдельно решает "явный отказ" в состоянии 1
-    # ниже) И карточка ещё не подтверждена (после подтверждения — это уже
-    # состояние 5, обычный диалог, там команда удаления не перехватывается
-    # этой веткой вообще).
-    law_given = candidates.is_law_acknowledged(candidate_id)
+    # Условие: согласие уже дано (иначе анкеты как таковой ещё нет, удалять
+    # пока нечего) И карточка ещё не подтверждена (после подтверждения — это
+    # уже обычный диалог, там команда удаления этой веткой не
+    # перехватывается).
     if law_given and not _card_already_confirmed(candidate_id):
         if anketa.is_delete_request(user_message):
             return anketa.DELETE_CONFIRMATION_PROMPT
 
     # Состояние 1: согласие 152-ФЗ ещё не получено.
-    if not candidates.is_law_acknowledged(candidate_id):
-        if last_bot_message == anketa.LAW_CONSENT_TEXT:
-            # Это ответ на уже показанный текст согласия.
+    if not law_given:
+        # endswith, а НЕ точное равенство. Текст согласия показывается
+        # кандидату СКЛЕЕННЫМ с ответом GigaChat ("Отлично, оформляем!" +
+        # текст согласия — см. get_answer), поэтому сравнение на равенство
+        # никогда не срабатывало, состояние не распознавалось, и анкета не
+        # начиналась вообще: кандидат отвечал "да", управление снова уходило
+        # в GigaChat, та опять ставила START_ANKETA, и текст согласия
+        # показывался по кругу. LAW_CONSENT_RETRY ниже тоже заканчивается
+        # этим же текстом, поэтому повторный вопрос не выбивает из состояния.
+        if last_bot_message.endswith(anketa.LAW_CONSENT_TEXT):
             if anketa.is_law_declined(user_message):
                 # Явный отказ — анкету не начинаем, кандидат остаётся в
                 # обычном диалоге (FAQ и консультации по-прежнему доступны,
                 # см. get_answer ниже — там как раз обычный путь через
-                # GigaChat, просто анкета не заводится).
+                # GigaChat, просто анкета не заводится). Карточка при этом
+                # НЕ создаётся: отказавшийся кандидат не должен оставлять
+                # после себя строку в таблице персональных данных.
                 return (
                     "Хорошо, анкету заполнять не будем. Если у вас есть "
                     "вопросы о вакансиях — с радостью отвечу."
                 )
-            # Что угодно ещё — считаем согласием.
+            if not anketa.is_law_accepted(user_message):
+                # Ответ не разобран. Раньше согласием считалось ВСЁ, что не
+                # совпало со списком отказа, поэтому случайная реплика
+                # ("хм", "а сколько это займёт?") молча включала сбор
+                # паспортных данных. Согласие по 152-ФЗ должно быть явным,
+                # поэтому переспрашиваем.
+                return anketa.LAW_CONSENT_RETRY
+
+            # Явное согласие получено — вот теперь заводим карточку.
+            candidate_id = candidates.get_or_create_candidate(source, external_id)
             candidates.mark_law_acknowledged(candidate_id)
-            first_field, first_question = anketa.get_next_step(candidate_id)
-            return first_question
+            first_step = anketa.get_next_step(candidate_id)
+            if first_step is None:
+                # Все поля уже заполнены (возможно только для карточки,
+                # созданной прежней версией кода) — сразу к подтверждению.
+                return anketa.format_card_for_confirmation(candidate_id)
+            return first_step[1]
+
         if anketa_start_requested:
-            # GigaChat ИМЕННО СЕЙЧАС поставила START_ANKETA (см. docstring
-            # выше) — кандидат только что согласился начать анкету в
-            # обычном диалоге. Показываем текст согласия впервые.
+            # GigaChat ИМЕННО СЕЙЧАС поставила START_ANKETA — кандидат
+            # только что согласился начать анкету в обычном диалоге.
+            # Показываем текст согласия впервые.
             return anketa.LAW_CONSENT_TEXT
+
         # Согласия не было запрошено — это НЕ анкетная ветка, обычный
         # диалог продолжается через GigaChat (FAQ, вопросы про вакансии).
         return None
@@ -466,18 +549,10 @@ def _handle_anketa_turn(candidate_id: str, source: str, external_id: str,
     # в обоих случаях кандидат сейчас отвечает на один и тот же вопрос,
     # просто со второй/третьей попытки.
     #
-    # ВАЖНОЕ ИСКЛЮЧЕНИЕ: сюда же попадает единственный случай, где
-    # user_message НЕ является ответом на поле — момент, когда согласие
-    # 152-ФЗ было получено только что, и бот ещё не успел показать первый
-    # вопрос анкеты (это происходит в состоянии 1 выше явным return, минуя
-    # этот код) — то есть на практике до этой строки такое сообщение никогда
-    # не доходит, состояние 1 перехватывает его раньше.
     # Мета-вопрос "что я уже заполнил" — не значение поля, а вопрос о самом
-    # процессе. Проверяется до попытки сохранить как значение (см. ниже) —
-    # иначе такой вопрос ошибочно интерпретировался бы как некорректный
-    # ответ на текущее поле (см. anketa.py:is_progress_question, там же
-    # объяснение, почему это отдельная проверка нужна именно теперь, после
-    # переделки анкеты на детерминированную стейт-машину).
+    # процессе. Проверяется до попытки сохранить как значение — иначе такой
+    # вопрос ошибочно интерпретировался бы как некорректный ответ на текущее
+    # поле (см. anketa.py:is_progress_question).
     if anketa.is_progress_question(user_message):
         return anketa.format_progress_answer(candidate_id)
 
@@ -523,7 +598,12 @@ def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3)
     start_time = time.time()
     _ensure_fresh()
 
-    candidate_id = candidates.get_or_create_candidate(source, external_id)
+    # find_candidate, а НЕ get_or_create_candidate: карточка заводится только
+    # в момент согласия по 152-ФЗ (см. _handle_anketa_turn). Раньше строка в
+    # candidates.csv создавалась на КАЖДОГО, кто написал боту хоть слово —
+    # человек спрашивал "какие есть вакансии" и уходил, а в таблице оставалась
+    # пустая карточка и запись в candidate_sessions.json.
+    candidate_id = candidates.find_candidate(source, external_id)
 
     with _history_lock:
         history = _load_history(source, external_id)
@@ -545,17 +625,22 @@ def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3)
     # посмотреть последний ответ бота в уже загруженной истории диалога.
     last_bot_message = history[-1]["content"] if history and history[-1].get("role") == "assistant" else ""
 
-    anketa_reply = _handle_anketa_turn(candidate_id, source, external_id, user_message, last_bot_message)
+    anketa_reply = _handle_anketa_turn(source, external_id, user_message, last_bot_message)
     if anketa_reply is not None:
         response_time_ms = int((time.time() - start_time) * 1000)
         history.append({"role": MessagesRole.USER, "content": user_message})
         history.append({"role": MessagesRole.ASSISTANT, "content": anketa_reply})
+        # Обрезка истории, как и в остальных ветках ниже. Без неё файл
+        # истории рос без ограничения все 29 шагов анкеты и дальше.
+        history = history[-MAX_HISTORY_MESSAGES:]
         with _history_lock:
             _save_history(source, external_id, history)
         logger.log_interaction(source, external_id, user_message, anketa_reply, response_time_ms, "ok")
         return anketa_reply, []
 
-    card = candidates.get_card(candidate_id)
+    # candidate_id может быть None — карточки ещё нет (кандидат просто задаёт
+    # вопросы и до анкеты не дошёл). Это нормальный, самый частый случай.
+    card = candidates.get_card(candidate_id) if candidate_id else {}
     progress_note = _format_candidate_progress(card)
 
     with _state_lock:
@@ -564,10 +649,11 @@ def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3)
         current_kb_index = _state["kb_index"]
         current_kb_metadata = _state["kb_metadata"]
         current_agent_prompt = _state["agent_prompt"]
-        current_knowledge_base = _state["knowledge_base"]
 
     query_vec = embed_text(user_message)
-    similar_items = search_similar(current_index, current_metadata, query_vec, k=top_k)
+    similar_items = search_similar(
+        current_index, current_metadata, query_vec, k=top_k, min_similarity=FAQ_MIN_SIMILARITY
+    )
 
     # --- Search-first: FAQ раньше GigaChat -------------------------------
     #
@@ -601,7 +687,7 @@ def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3)
         return faq_answer, similar_items
 
     # Не нашли релевантный вопрос в FAQ — обращаемся к GigaChat. Прежде чем
-    # строить промпт, делаем ОТДЕЛЬНЫЙ поиск по knowledge_base.json (см.
+    # строить промпт, делаем ОТДЕЛЬНЫЙ поиск по базе знаний из data/kb/ (см.
     # backend/kb_chunker.py, backend/build_index.py) — раздельный от FAQ-
     # поиска выше индекс, чтобы найденные факты из базы знаний не
     # конкурировали за место в top_k с готовыми FAQ-ответами (которые сюда
@@ -612,18 +698,16 @@ def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3)
     # изначально, до первой сборки KB-индекса.
     kb_chunks = []
     if current_kb_index is not None:
-        kb_chunks = search_similar(current_kb_index, current_kb_metadata, query_vec, k=top_k)
+        kb_chunks = search_similar(
+            current_kb_index, current_kb_metadata, query_vec, k=KB_TOP_K, min_similarity=KB_MIN_SIMILARITY
+        )
 
     # ВАЖНО: явно добавляем user_message отдельным элементом уже внутри
     # messages ниже — если кандидат называет вакансию ПРЯМО В ЭТОМ
     # сообщении (например, самое первое сообщение диалога), в history его
     # ещё нет; для самого промпта это не нужно (kb_chunks уже найдены по
     # query_vec — векторному представлению именно user_message).
-    current_system_prompt = _build_system_prompt(
-        current_agent_prompt,
-        current_knowledge_base,
-        kb_chunks=kb_chunks,
-    )
+    current_system_prompt = _build_system_prompt(current_agent_prompt, kb_chunks)
 
     messages = [Messages(role=MessagesRole.SYSTEM, content=current_system_prompt)]
 
@@ -660,7 +744,11 @@ def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3)
         # одного диалога не меняется между сообщениями кандидата, значит по
         # документации должна кешироваться), и от TTL кеша на стороне
         # GigaChat, который в документации явно не указан числом.
-        gigachat.context.session_id_cvar.set(candidate_id)
+        # candidate_id может ещё не существовать (карточка заводится только
+        # при согласии по 152-ФЗ) — тогда берём стабильную пару
+        # источник+идентификатор диалога: для кеша важно лишь то, чтобы
+        # значение не менялось между сообщениями одного разговора.
+        gigachat.context.session_id_cvar.set(candidate_id or f"{source}_{external_id}")
 
         # verify_ssl_certs=True (по умолчанию у самой библиотеки gigachat)
         # — раньше здесь стояло False, потому что без корневого сертификата
@@ -743,7 +831,7 @@ def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3)
         # 152-ФЗ (см. _handle_anketa_turn, anketa_start_requested=True),
         # объединяя его с ответом GigaChat в одно сообщение кандидату.
         consent_text = _handle_anketa_turn(
-            candidate_id, source, external_id, user_message, last_bot_message,
+            source, external_id, user_message, last_bot_message,
             anketa_start_requested=True,
         )
         if consent_text:
@@ -771,4 +859,4 @@ def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3)
         cached_tokens=precached_tokens,
     )
 
-    return clean_answer, similar_items
+    return clean_answer, similar_items

@@ -520,8 +520,15 @@ def _handle_anketa_turn(source: str, external_id: str,
             if anketa.is_confirmation_yes(user_message):
                 candidates.mark_card_confirmed(candidate_id)
                 fresh_card = candidates.get_card(candidate_id)
+                # Кнопка раскрывает полную анкету по запросу HR — сами
+                # паспортные данные в ленту группы не публикуются, см.
+                # backend/notifications.py:format_full_card.
                 notifications.send_hr_notification(
-                    notifications.format_new_candidate_notification(fresh_card)
+                    notifications.format_new_candidate_notification(fresh_card),
+                    buttons=[{
+                        "text": "Показать все данные кандидата",
+                        "callback_data": f"card:{candidate_id}",
+                    }],
                 )
                 return (
                     "Спасибо! Анкета принята, с вами свяжется наш менеджер. "
@@ -590,11 +597,41 @@ def _format_candidate_progress(card: dict) -> str:
     )
 
 
+# Отдельная блокировка на КАЖДЫЙ диалог. _history_lock защищает только сами
+# операции чтения и записи файла, но между чтением истории в начале
+# get_answer и записью в конце проходит вызов GigaChat — несколько секунд.
+# Два сообщения одного человека, отправленные в этот промежуток (две
+# вкладки сайта, быстрый повтор в Telegram), читали одну и ту же историю и
+# записывали её по очереди: сообщение того, кто закончил первым, пропадало.
+#
+# Общая блокировка на всех тут не годится — она выстроила бы в очередь
+# вообще всех кандидатов на время каждого обращения к модели. Блокировка
+# на диалог сериализует только сообщения одного человека, а это ровно то,
+# что и должно быть: два своих сообщения он всё равно ждёт по очереди.
+_session_locks: dict[str, threading.Lock] = {}
+_session_locks_guard = threading.Lock()
+
+
+def _session_lock(source: str, external_id: str) -> threading.Lock:
+    key = f"{source}:{external_id}"
+    with _session_locks_guard:
+        return _session_locks.setdefault(key, threading.Lock())
+
+
 def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3):
     """
     source — "site" или "telegram".
     external_id — стабильный идентификатор диалога (session_id сайта или chat_id Telegram).
+
+    Обёртка над _get_answer: держит блокировку диалога на всё время
+    обработки, чтобы два одновременных сообщения одного кандидата не
+    затирали историю друг друга (см. комментарий к _session_locks выше).
     """
+    with _session_lock(source, external_id):
+        return _get_answer(user_message, source, external_id, top_k)
+
+
+def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3):
     start_time = time.time()
     _ensure_fresh()
 

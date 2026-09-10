@@ -25,7 +25,16 @@ import sys
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(PROJECT_ROOT, ".env")
-ENV_EXAMPLE_PATH = os.path.join(PROJECT_ROOT, ".env.example")
+# Оба имени: часть архиваторов и почтовых клиентов при распаковке теряет
+# ведущую точку, и файл приезжает как env.example. Раньше setup.py его не
+# находил и создавал ПУСТОЙ .env — без единой заготовки, из-за чего человек
+# не понимал, что вообще нужно заполнять.
+_ENV_EXAMPLE_NAMES = (".env.example", "env.example")
+ENV_EXAMPLE_PATH = next(
+    (os.path.join(PROJECT_ROOT, n) for n in _ENV_EXAMPLE_NAMES
+     if os.path.exists(os.path.join(PROJECT_ROOT, n))),
+    os.path.join(PROJECT_ROOT, ".env.example"),
+)
 REQUIREMENTS_PATH = os.path.join(PROJECT_ROOT, "requirements.txt")
 
 
@@ -116,17 +125,20 @@ def _install_gigachat_certificate():
 
 
 def _install_dependencies():
-    print("Устанавливаю зависимости из requirements.txt (это может занять несколько минут)...")
+    """Ставит зависимости молча (-q).
+
+    Без -q pip печатает по строке "Requirement already satisfied" на каждый
+    из полусотни пакетов при КАЖДОМ запуске — полезной информации ноль, а
+    важные сообщения ниже тонут в этой простыне. Ошибки -q не скрывает: при
+    сбое pip всё равно напечатает причину, и мы её увидим."""
+    print("Проверяю зависимости...")
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-r", REQUIREMENTS_PATH]
+        [sys.executable, "-m", "pip", "install", "-q", "-r", REQUIREMENTS_PATH]
     )
     if result.returncode != 0:
         print()
-        print("ОШИБКА: не удалось установить зависимости (pip завершился с ошибкой выше).")
-        print("Ключ шифрования НЕ генерируется, пока зависимости не установлены — "
-              "сначала устраните ошибку pip и запустите 'python setup.py' ещё раз.")
+        print("ОШИБКА: не удалось установить зависимости (причина в выводе pip выше).")
         sys.exit(1)
-    print("Зависимости установлены.")
 
 
 def _ensure_env_file():
@@ -201,11 +213,9 @@ def _ensure_encryption_key():
     existing_key = _get_env_value(lines, "ENCRYPTION_KEY")
 
     if existing_key:
-        print()
-        print("Ключ шифрования (ENCRYPTION_KEY) в .env уже задан — оставляю без изменений.")
-        print("(если нужен новый ключ — учтите: старые данные кандидатов, зашифрованные")
-        print("текущим ключом, станут нечитаемыми без него; меняйте вручную только если")
-        print("точно понимаете, что делаете)")
+        # Подробное предупреждение про потерю ключа печатается один раз в
+        # конце запуска (run_all.print_encryption_key_notice) — дублировать
+        # его здесь значит показывать одно и то же дважды за один старт.
         return
 
     from cryptography.fernet import Fernet
@@ -215,20 +225,7 @@ def _ensure_encryption_key():
     with open(ENV_PATH, "w", encoding="utf-8") as f:
         f.write("\n".join(new_lines) + "\n")
 
-    print()
-    print("=" * 70)
-    print("ЗАВИСИМОСТИ УСТАНОВЛЕНЫ. ВОТ ВАШ КЛЮЧ ДЛЯ ШИФРОВАНИЯ ДАННЫХ:")
-    print()
-    print(f"    {new_key}")
-    print()
-    print("Он уже сохранён в файл .env (строка ENCRYPTION_KEY) — ничего")
-    print("дополнительно вставлять не нужно, программа найдёт его сама.")
-    print()
-    print("ВАЖНО: сохраните этот ключ ещё и отдельно — например, в менеджере")
-    print("паролей или в заметке. Если файл .env будет потерян или удалён,")
-    print("а ключа не останется больше нигде — расшифровать уже сохранённые")
-    print("анкеты кандидатов будет невозможно.")
-    print("=" * 70)
+    print("Создан новый ключ шифрования, записан в .env.")
 
 
 def _check_other_required_settings():
@@ -249,22 +246,27 @@ def _check_other_required_settings():
 
     if missing:
         print()
-        print("Перед запуском (python run_all.py) заполните в .env ещё:")
+        print("Заполните в .env:")
         for item in missing:
             print(f"  - {item}")
 
 
-def main():
+def main(standalone: bool = True):
+    """Установка: зависимости, сертификат GigaChat, .env, ключ шифрования.
+
+    standalone=False передаёт start.py — он сразу продолжает запуском, и
+    подсказка "теперь выполните python run_all.py" в этом случае не только
+    лишняя, но и сбивает с толку: выглядит так, будто нужна вторая команда,
+    хотя проект уже стартует следующей строкой."""
     _install_dependencies()
     _install_gigachat_certificate()
     _ensure_env_file()
     _ensure_encryption_key()
     _check_other_required_settings()
 
-    print()
-    print("Установка завершена. Для запуска программы используйте:")
-    print()
-    print("    python run_all.py")
+    if standalone:
+        print()
+        print("Установка завершена. Для запуска: python start.py")
 
 
 if __name__ == "__main__":

@@ -39,8 +39,10 @@ import run_all
 
 
 def main():
-    setup.main()
-    print()
+    # standalone=False убирает из setup.py хвост "теперь выполните
+    # python run_all.py": здесь запуск идёт следующей же строкой, и такая
+    # подсказка выглядела бы как требование второй команды.
+    setup.main(standalone=False)
     run_all.main()
 
 

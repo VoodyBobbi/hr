@@ -32,21 +32,33 @@ import time
 
 # --- Настраиваемые пороги -----------------------------------------------
 #
-# Значения ниже — начальные ориентиры, не результат замера реального
-# трафика (у проекта его ещё не было) — при необходимости смените без
-# затрагивания остальной логики модуля.
-REPEAT_WINDOW_SECONDS = 5.0      # быстрее этого между сообщениями = "частит"
-ANOMALOUS_LENGTH_CHARS = 1500    # длиннее этого = "аномальная длина"
-BLOCK_THRESHOLD = 5              # баллов для блокировки
-BLOCK_DURATION_MINUTES = 5
+# Значения подобраны так, чтобы НЕ мешать заполнению анкеты. Это главный
+# сценарий, который прежние настройки ломали: кандидат отвечает на 29
+# вопросов подряд короткими репликами ("Иванов", "12.04.1988", "нет"), и
+# каждый ответ приходил быстрее чем через 5 секунд после предыдущего.
+# Начислялось по 2 балла, порог был 5, баллы НИКОГДА не убывали — на
+# третьем-четвёртом поле анкеты человек получал блокировку на 5 минут.
+# Ровно это и происходило: "Вы отправляете сообщения слишком часто" сразу
+# после даты рождения.
+FAST_REPLY_SECONDS = 1.5         # быстрее этого между сообщениями = машинный темп
+ANOMALOUS_LENGTH_CHARS = 1500    # длиннее этого = аномальная длина
+BLOCK_THRESHOLD = 8              # баллов для блокировки
+BLOCK_DURATION_MINUTES = 2
 
 REPEAT_MESSAGE_POINTS = 2
-HIGH_FREQUENCY_POINTS = 2
+HIGH_FREQUENCY_POINTS = 1
 ANOMALOUS_LENGTH_POINTS = 1
+
+# За сколько секунд «сгорает» один балл. Без затухания баллы копились за всю
+# жизнь процесса: человек, спокойно поговоривший с ботом несколько раз за
+# день, рано или поздно набирал порог и получал блокировку ни за что.
+# Спам отличается от нормального диалога не общим числом сообщений, а их
+# ПЛОТНОСТЬЮ во времени — затухание как раз это и выражает.
+POINT_DECAY_SECONDS = 20.0
 
 _lock = threading.Lock()
 
-# key -> {"last_message": str, "last_time": float, "points": int, "blocked_until": float}
+# key -> {"last_message": str, "last_time": float, "points": float, "blocked_until": float}
 _state: dict[str, dict] = {}
 
 
@@ -78,31 +90,47 @@ def is_blocked(source: str, external_id: str) -> tuple[bool, float]:
 
 
 def record_message(source: str, external_id: str, message: str) -> None:
-    """Начисляет баллы за текущее сообщение по трём признакам (повтор,
-    частота, длина) и, если порог достигнут, устанавливает блокировку.
-    Вызывается ПОСЛЕ is_blocked (см. app.py и telegram_bot.py: сначала
-    проверка блокировки, потом начисление баллов за текущее сообщение) — то
-    есть сообщение, которое только что довело счётчик до порога, само ещё
-    проходит, а блокируется уже следующее. Это осознанный компромисс
-    простоты, не критичный для цели модуля: задача — остановить
-    продолжающийся спам, а не поймать самое первое сообщение атаки.
+    """Начисляет баллы за текущее сообщение и, если порог достигнут,
+    устанавливает блокировку.
 
-    Прежняя редакция этого докстринга описывала порядок наоборот; сам код
-    при этом не менялся."""
+    Вызывается ПОСЛЕ is_blocked (см. app.py и telegram_bot.py), поэтому
+    сообщение, которое довело счётчик до порога, само ещё проходит, а
+    блокируется уже следующее.
+
+    Три признака, за которые начисляются баллы:
+
+    - повтор ровно того же текста, причём ТОЛЬКО если он пришёл быстро.
+      Проверка времени здесь принципиальна: в анкете кандидат совершенно
+      законно отвечает "нет" на три вопроса про судимости подряд, и раньше
+      это давало 6 баллов из 5 нужных для блокировки;
+    - машинный темп — меньше FAST_REPLY_SECONDS между сообщениями. Человек
+      физически не набирает осмысленный текст быстрее;
+    - аномальная длина — попытка забить контекст модели.
+
+    Перед начислением баллы уменьшаются на прошедшее время
+    (POINT_DECAY_SECONDS на балл), поэтому обычный разговор с паузами
+    счётчик не накапливает."""
     key = _key(source, external_id)
     now = time.time()
 
     with _lock:
-        entry = _state.setdefault(key, {"last_message": "", "last_time": 0.0, "points": 0, "blocked_until": 0.0})
+        entry = _state.setdefault(
+            key, {"last_message": "", "last_time": 0.0, "points": 0.0, "blocked_until": 0.0}
+        )
+
+        # Затухание: сколько баллов «сгорело» с прошлого сообщения.
+        if entry["last_time"]:
+            elapsed = now - entry["last_time"]
+            entry["points"] = max(0.0, entry["points"] - elapsed / POINT_DECAY_SECONDS)
+
+        gap = now - entry["last_time"] if entry["last_time"] else None
+        is_fast = gap is not None and gap < FAST_REPLY_SECONDS
 
         points_added = 0
-
-        if entry["last_message"] and message == entry["last_message"]:
+        if is_fast and entry["last_message"] and message == entry["last_message"]:
             points_added += REPEAT_MESSAGE_POINTS
-
-        if entry["last_time"] and (now - entry["last_time"]) < REPEAT_WINDOW_SECONDS:
+        if is_fast:
             points_added += HIGH_FREQUENCY_POINTS
-
         if len(message) > ANOMALOUS_LENGTH_CHARS:
             points_added += ANOMALOUS_LENGTH_POINTS
 
@@ -112,6 +140,4 @@ def record_message(source: str, external_id: str, message: str) -> None:
 
         if entry["points"] >= BLOCK_THRESHOLD:
             entry["blocked_until"] = now + BLOCK_DURATION_MINUTES * 60
-            entry["points"] = 0  # сбрасываем счётчик — блокировка сама по себе уже наказание
-
-
+            entry["points"] = 0.0

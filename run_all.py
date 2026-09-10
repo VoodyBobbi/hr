@@ -28,6 +28,23 @@ backend, вручную их заводить не нужно. По умолча
 import os
 import subprocess
 import sys
+import time
+
+# Глушим служебный шум библиотек HuggingFace ДО первого импорта backend.
+#
+# Без этого при каждом запуске в консоль трижды (главный процесс, uvicorn,
+# Telegram-бот) печатается "Warning: You are sending unauthenticated requests
+# to the HF Hub" и полоса "Loading weights: 100%|####|". Ни то, ни другое не
+# говорит о проблеме: модель эмбеддингов уже лежит в локальном кеше и просто
+# загружается в память. Полезные сообщения тонут в этом шуме.
+#
+# Переменные окружения, а не вызовы функций логирования: их наследуют
+# дочерние процессы (uvicorn и бот запускаются через subprocess ниже), а
+# настройка логгера в этом процессе на них бы не подействовала.
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
 def _check_encryption_key():
@@ -98,8 +115,6 @@ def main():
     from backend import logger
     logger.purge_old_logs()
 
-    print_encryption_key_notice()
-
     processes = []
 
     server_process = subprocess.Popen([
@@ -115,8 +130,18 @@ def main():
     ])
     processes.append(bot_process)
 
-    print("Запущено: сайт (http://localhost:8000) и Telegram-бот.")
-    print("Нажмите Ctrl+C, чтобы остановить всё.")
+    # Пауза, чтобы uvicorn и Telegram-бот успели напечатать свои строки
+    # запуска. Без неё сообщение с ключом ниже выводится ПЕРЕД ними и
+    # уезжает вверх экрана. Строго "в конце" его показать невозможно:
+    # сервер работает, пока его не остановят, и логи запросов идут всё
+    # время — поэтому ключ печатается последним в стартовой части вывода,
+    # сразу под строками запуска.
+    time.sleep(4)
+
+    print()
+    print("Запущено: сайт http://localhost:8000 и Telegram-бот.")
+    print("Остановить — Ctrl+C.")
+    print_encryption_key_notice()
 
     try:
         for p in processes:

@@ -106,6 +106,36 @@ def _validate_digits(value: str, field_name: str, length: int, label: str) -> st
     return v
 
 
+# Ответы, которыми кандидат сообщает, что документа у него нет. Нужны для
+# полей, которые бывают физически отсутствуют — например ИНН у гражданина
+# Республики Беларусь, приехавшего впервые.
+_ABSENT_ANSWERS = {"нет", "нету", "отсутствует", "не имею", "не получал", "-", "—"}
+
+
+def _validate_optional_digits(value: str, field_name: str, length: int, label: str) -> str:
+    """Как _validate_digits, но разрешает ответ «нет».
+
+    Зачем. ИНН строго из 12 цифр отправлял в бесконечный переспрос любого,
+    у кого его нет: кандидат пишет «нет», валидатор отвечает «должен
+    содержать 12 цифр», кандидат пишет «нету» — и так по кругу, выйти из
+    анкеты невозможно. Для граждан Беларуси, которых компания набирает
+    наравне с гражданами РФ, это штатная ситуация, а не ошибка ввода.
+
+    Сохраняем «нет» как есть: HR увидит в карточке пустое место в этом поле
+    и запросит ИНН на этапе оформления, когда кандидат его получит."""
+    v = _require_nonempty(value, field_name, 32)
+    if v.strip().lower() in _ABSENT_ANSWERS:
+        return "нет"
+    digits = re.sub(r"\D", "", v)
+    if len(digits) != length:
+        raise FieldValidationError(
+            field_name,
+            f"{label} должен содержать {length} цифр, получено {len(digits)}. "
+            f"Если {label} у вас пока нет — напишите «нет».",
+        )
+    return v
+
+
 def _validate_dept_code(value: str, field_name: str) -> str:
     v = _require_nonempty(value, field_name, 16)
     digits = re.sub(r"\D", "", v)
@@ -149,7 +179,7 @@ _VALIDATORS = {
     "Дата выдачи": lambda v, f: _validate_date(v, f, allow_future=False),
     "Код подразделения выдачи паспорта": _validate_dept_code,
     "СНИЛС": lambda v, f: _validate_digits(v, f, 11, "СНИЛС"),
-    "ИНН": lambda v, f: _validate_digits(v, f, 12, "ИНН"),
+    "ИНН": lambda v, f: _validate_optional_digits(v, f, 12, "ИНН"),
     "Рост": lambda v, f: _validate_number_range(v, f, 100, 230, "рост (см)"),
     "Вес": lambda v, f: _validate_number_range(v, f, 30, 250, "вес (кг)"),
     "Размер одежды": _validate_clothing_size,

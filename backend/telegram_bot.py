@@ -3,9 +3,18 @@ import os
 
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from .assistant import get_answer
+from . import candidates
+from . import notifications
 from . import rate_limiting
 
 load_dotenv()
@@ -116,6 +125,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply_long(update, answer)
 
 
+async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Нажатие кнопки «Показать все данные кандидата» в HR-группе.
+
+    Проверка чата обязательна. callback_data приходит от Telegram и содержит
+    id кандидата — без проверки любой человек, узнавший формат строки, мог бы
+    вытащить чужую анкету из личной переписки с ботом. Отвечаем полной
+    карточкой только если кнопку нажали именно в той группе, которая указана
+    в TELEGRAM_HR_GROUP_CHAT_ID."""
+    query = update.callback_query
+    await query.answer()
+
+    _, hr_chat_id = notifications._settings()
+    if not hr_chat_id or str(query.message.chat.id) != str(hr_chat_id):
+        await query.edit_message_reply_markup(reply_markup=None)
+        return
+
+    data = query.data or ""
+    if not data.startswith("card:"):
+        return
+    candidate_id = data.split(":", 1)[1]
+
+    card = await asyncio.to_thread(candidates.get_card, candidate_id)
+    if not card:
+        await query.message.reply_text("Карточка не найдена — возможно, кандидат удалил свои данные.")
+        return
+
+    text = notifications.format_full_card(card)
+    for part in split_message(text):
+        await query.message.reply_text(part, parse_mode="HTML")
+
+    # Кнопку убираем: данные уже показаны, повторные нажатия только
+    # засоряли бы группу копиями одной и той же анкеты.
+    await query.edit_message_reply_markup(reply_markup=None)
+
+
 def main():
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -138,6 +182,10 @@ def main():
             handle_message,
         )
     )
+    # Нажатия кнопок под уведомлениями. Фильтра по типу чата здесь нет
+    # намеренно: кнопка живёт в HR-группе, а проверку, что нажали именно
+    # там, делает сам show_card.
+    application.add_handler(CallbackQueryHandler(show_card, pattern=r"^card:"))
 
     print("Telegram bot started. Press Ctrl+C to stop.")
     application.run_polling()

@@ -1,4 +1,7 @@
-#!/bin/sh
+#!/bin/bash
+# bash, а не sh: ниже используется "wait -n" (ждать падения ЛЮБОГО из двух
+# процессов), которого нет в dash — а именно dash является /bin/sh в
+# образе python:3.11-slim, на котором собран контейнер.
 set -e
 
 PORT="${PORT:-8000}"
@@ -27,11 +30,33 @@ python -c "from backend.logger import purge_old_logs; purge_old_logs()"
 
 # Telegram-бот — опциональный канал. Если секрет TELEGRAM_BOT_TOKEN не задан
 # в Environment Variables сервиса, просто пропускаем запуск бота (сайт работает как обычно).
+# Telegram-бот — опциональный канал. Если TELEGRAM_BOT_TOKEN не задан,
+# просто пропускаем его запуск, сайт работает как обычно.
+#
+# Если бот запущен, его процесс НАДЗИРАЕТСЯ: при его падении контейнер
+# останавливается целиком, и Docker с restart: unless-stopped поднимает всё
+# заново. Раньше бот уходил в фон через & без всякого присмотра — упав, он
+# молча переставал отвечать кандидатам, а контейнер продолжал жить как ни в
+# чём не бывало, и заметить это можно было только по жалобам.
 if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
-  echo "TELEGRAM_BOT_TOKEN задан — запускаю Telegram-бота в фоне"
+  echo "TELEGRAM_BOT_TOKEN задан — запускаю Telegram-бота"
   python -m backend.telegram_bot &
-else
-  echo "TELEGRAM_BOT_TOKEN не задан — Telegram-бот не запускается, поднимаю только сайт"
-fi
+  BOT_PID=$!
 
-exec uvicorn backend.app:app --host 0.0.0.0 --port "$PORT"
+  uvicorn backend.app:app --host 0.0.0.0 --port "$PORT" &
+  WEB_PID=$!
+
+  # Останавливаем оба процесса по сигналу от Docker (docker stop),
+  # иначе контейнер ждал бы таймаута перед принудительным убийством.
+  trap 'kill "$BOT_PID" "$WEB_PID" 2>/dev/null' TERM INT
+
+  # wait -n возвращается, как только УПАЛ ЛЮБОЙ из двух процессов.
+  wait -n "$BOT_PID" "$WEB_PID"
+  EXIT_CODE=$?
+  echo "Один из процессов завершился (код $EXIT_CODE) — останавливаю контейнер."
+  kill "$BOT_PID" "$WEB_PID" 2>/dev/null
+  exit "$EXIT_CODE"
+else
+  echo "TELEGRAM_BOT_TOKEN не задан — поднимаю только сайт"
+  exec uvicorn backend.app:app --host 0.0.0.0 --port "$PORT"
+fi

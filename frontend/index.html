@@ -57,8 +57,10 @@ body{
 
 #shell{
   height:100%;
+  max-height:100%;
   display:grid;
   grid-template-columns:minmax(0,42fr) minmax(0,58fr);
+  overflow:hidden;
 }
 
 /* ======================= ЛЕВАЯ ЧАСТЬ: ПРЕДЛОЖЕНИЕ ==================== */
@@ -66,16 +68,19 @@ body{
 #pitch{
   position:relative;
   min-width:0;
-  padding:clamp(28px,3.4vw,56px);
+  padding:clamp(24px,3vw,52px);
   display:flex;
   flex-direction:column;
   justify-content:space-between;
+  gap:16px;
+  min-height:0;
   background:
     linear-gradient(180deg,rgba(16,28,36,.62) 0%,rgba(11,95,165,.72) 100%),
     url("/static/hero-alpinist.jpg") center/cover no-repeat;
   color:#fff;
   overflow:hidden;
 }
+
 
 /* Вертикальные волоски — мотив стоек строительных лесов. Не украшение:
    они привязаны к трём цифрам ниже и визуально держат их в одной
@@ -242,8 +247,11 @@ h1{
   flex:none;
   display:flex;
   gap:10px;
-  padding:12px clamp(16px,2vw,26px);
-  padding-bottom:calc(12px + env(safe-area-inset-bottom));
+  padding:14px clamp(16px,2vw,26px);
+  /* Запас снизу. Панель задач Windows и панель жестов на телефонах
+     перекрывают нижние пиксели окна браузера, и поле ввода оказывалось
+     наполовину под ними. 22px + safe-area держат его выше края. */
+  padding-bottom:calc(22px + env(safe-area-inset-bottom));
   background:var(--paper);
   border-top:1px solid #DCE3E8;
 }
@@ -283,9 +291,12 @@ h1{
   #pitch{
     padding:14px 16px;
     gap:10px;
+    /* Размер фона задан в процентах ШИРИНЫ (cover по высоте не считается),
+       поэтому появление и скрытие адресной строки браузера не заставляет
+       картинку пересчитываться и дёргаться при прокрутке ленты. */
     background:
       linear-gradient(180deg,rgba(16,28,36,.66) 0%,rgba(11,95,165,.78) 100%),
-      url("/static/hero-alpinist.jpg") center 28%/cover no-repeat;
+      url("/static/hero-alpinist.jpg") center 28%/100% auto no-repeat;
   }
   #pitch::after{display:none}
   h1{font-size:22px;max-width:none;margin-top:8px}
@@ -295,6 +306,27 @@ h1{
   .fact span{font-size:10.5px;margin-top:3px}
   #bar{display:none}
   .msg{max-width:92%}
+}
+
+/* Невысокое окно или увеличенный масштаб страницы: текст предложения
+   уменьшается и частично убирается, чтобы содержимое гарантированно
+   помещалось. Иначе оно распирало панель и страница выглядела «съехавшей»,
+   хотя прокрутки при overflow:hidden всё равно нет. */
+@media (min-width:901px) and (max-height:820px){
+  h1{font-size:clamp(26px,2.8vw,38px)}
+  .lede{margin-top:12px;font-size:15px}
+  .fact b{font-size:clamp(19px,2vw,27px)}
+}
+@media (min-width:901px) and (max-height:660px){
+  .lede{display:none}
+  #pitch{padding:22px}
+}
+@media (min-width:901px) and (max-height:520px){
+  .facts{display:none}
+}
+@media (max-width:900px) and (max-height:620px){
+  h1{font-size:18px}
+  .facts{display:none}
 }
 
 @media (prefers-reduced-motion:reduce){

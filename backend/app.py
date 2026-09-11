@@ -1,5 +1,6 @@
 import os
 import uuid
+import warnings
 
 from dotenv import load_dotenv
 from fastapi import Cookie, FastAPI, Request, Response
@@ -74,7 +75,32 @@ app.add_middleware(
 # счёту за GigaChat, либо по стабильности сервера (см. README).
 CHAT_RATE_LIMIT_PER_MINUTE = int(os.getenv("CHAT_RATE_LIMIT_PER_MINUTE", "20"))
 
-limiter = Limiter(key_func=get_remote_address)
+# config_filename здесь ОБЯЗАТЕЛЕН, хотя выглядит странно.
+#
+# slowapi при создании Limiter сам, без спроса, ищет в текущей папке файл
+# .env и читает его через starlette.config.Config. А тот открывает файл БЕЗ
+# указания кодировки — то есть в кодировке, принятой в системе. На русской
+# Windows это cp1251, и любая кириллица в .env валит запуск с ошибкой:
+#
+#   UnicodeDecodeError: 'charmap' codec can't decode byte 0x98
+#
+# Падает при этом ИМПОРТ backend.app, поэтому сайт не поднимается вообще.
+# В консоли это выглядит особенно обманчиво: Telegram-бот стартует как ни в
+# чём не бывало, строка про запущенный сайт печатается, а самого сайта нет.
+#
+# Своё содержимое проекта читает сам, через load_dotenv (python-dotenv
+# открывает файл в UTF-8 явно и таких проблем не имеет). Ограничителю
+# частоты запросов наш .env не нужен вообще — просто уводим его на
+# несуществующий путь, и файл он не трогает.
+#
+# catch_warnings глушит предупреждение starlette о ненайденном файле —
+# файла и не должно быть, сообщать тут не о чем.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    limiter = Limiter(
+        key_func=get_remote_address,
+        config_filename="slowapi-config-unused",
+    )
 app.state.limiter = limiter
 
 

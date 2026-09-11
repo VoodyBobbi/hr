@@ -125,10 +125,19 @@ def main():
     ])
     processes.append(server_process)
 
-    bot_process = subprocess.Popen([
-        sys.executable, "-m", "backend.telegram_bot",
-    ])
-    processes.append(bot_process)
+    # Telegram-бот запускается, только если задан токен. Раньше он
+    # запускался всегда и без токена падал с трассировкой на десять строк
+    # прямо посреди вывода — сайт при этом работал (бот отдельный процесс),
+    # но выглядело так, будто сломалось всё. В start.sh для Docker такая
+    # проверка была с самого начала, а здесь её не было.
+    if os.getenv("TELEGRAM_BOT_TOKEN", "").strip():
+        bot_process = subprocess.Popen([
+            sys.executable, "-m", "backend.telegram_bot",
+        ])
+        processes.append(bot_process)
+        channels = "сайт http://localhost:8000 и Telegram-бот"
+    else:
+        channels = "сайт http://localhost:8000 (Telegram-бот не запущен: в .env нет TELEGRAM_BOT_TOKEN)"
 
     # Пауза, чтобы uvicorn и Telegram-бот успели напечатать свои строки
     # запуска. Без неё сообщение с ключом ниже выводится ПЕРЕД ними и
@@ -139,7 +148,7 @@ def main():
     time.sleep(4)
 
     print()
-    print("Запущено: сайт http://localhost:8000 и Telegram-бот.")
+    print(f"Запущено: {channels}.")
     print("Остановить — Ctrl+C.")
     print_encryption_key_notice()
 

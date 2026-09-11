@@ -230,17 +230,29 @@ def chat(request: Request, response: Response, body: ChatRequest,
     # минуту с IP, не заботясь об их содержании). Проверяется ДО get_answer,
     # чтобы заблокированный кандидат не тратил впустую вызов GigaChat.
     #
-    # Ключ — IP-адрес, а НЕ session_id. Раньше ключом была сессия, а сессию
-    # выдаёт сам сервер при каждом запросе без cookie: скрипту достаточно было
-    # не хранить cookie, чтобы на каждое сообщение получать чистый счётчик,
-    # и вся балльная защита сайта не работала вообще. IP берётся той же
-    # функцией get_remote_address, что использует slowapi, — если сайт стоит
-    # за обратным прокси, настройте прокси на передачу реального адреса
-    # (X-Forwarded-For) и запускайте uvicorn с --proxy-headers, иначе все
-    # посетители будут выглядеть одним адресом.
-    client_key = get_remote_address(request)
+    # Балльный счётчик привязан к СЕССИИ браузера, а не к IP-адресу.
+    #
+    # По IP считать нельзя: за одним внешним адресом сидят сотня коллег в
+    # офисе, посетители кафе с общим Wi-Fi или целый район на NAT мобильного
+    # оператора. Их сообщения сливаются в один поток, промежутки между ними
+    # оказываются короткими, и счётчик срабатывал бы от обычной работы
+    # десятка людей — блокируя всех разом за то, чего никто не делал.
+    #
+    # Обход через очистку cookie при этом остаётся возможен, и это
+    # осознанный размен: от него защищает лимит slowapi выше — не больше
+    # CHAT_RATE_LIMIT_PER_MINUTE запросов в минуту с одного IP, независимо
+    # от cookie. Он ограничивает ущерб, но, в отличие от блокировки, не
+    # выключает бота для целого офиса. Если поток с одного адреса всё же
+    # мешает, уменьшайте CHAT_RATE_LIMIT_PER_MINUTE в .env. Если сайт стоит
+    # за обратным прокси, настройте передачу X-Forwarded-For и запускайте
+    # uvicorn с --proxy-headers, иначе для slowapi все посетители будут
+    # выглядеть одним адресом.
+    session_key = f"session:{session_id}"
 
-    is_blocked_now, _ = rate_limiting.is_blocked("site", client_key)
+    # Во время анкеты счётчик не работает вообще — см. rate_limiting.in_anketa.
+    in_anketa = rate_limiting.in_anketa("site", session_id)
+
+    is_blocked_now, _ = (False, 0.0) if in_anketa else rate_limiting.is_blocked("site", session_key)
     if is_blocked_now:
         if is_new_session:
             _set_session_cookie(response, session_id)
@@ -252,7 +264,8 @@ def chat(request: Request, response: Response, body: ChatRequest,
             context=[],
             session_id=session_id,
         )
-    rate_limiting.record_message("site", client_key, body.message)
+    if not in_anketa:
+        rate_limiting.record_message("site", session_key, body.message)
 
     answer, similar_items = get_answer(
         body.message,

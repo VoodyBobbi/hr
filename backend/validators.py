@@ -70,15 +70,25 @@ def _validate_date(value: str, field_name: str, *, allow_future: bool = False,
 
 
 def _validate_phone(value: str, field_name: str) -> str:
+    """Телефон, приведённый к единому виду +7XXXXXXXXXX.
+
+    Нормализация обязательна для работы HR. Раньше номер сохранялся ровно
+    так, как его набрал кандидат: «89991234567», «+7 (999) 123-45-67» и
+    «8-999-123-45-67» лежали в таблице тремя разными строками. Менеджер
+    искал по одному формату и не находил человека, который написал другим,
+    — при том что номер один и тот же."""
     v = _require_nonempty(value, field_name, 32)
     digits = re.sub(r"\D", "", v)
+
     if len(digits) == 11 and digits[0] in ("7", "8"):
-        pass
+        digits = "7" + digits[1:]
     elif len(digits) == 10:
-        pass
+        digits = "7" + digits
     else:
-        raise FieldValidationError(field_name, "похоже на неверный номер телефона (ожидается 10-11 цифр).")
-    return v
+        raise FieldValidationError(
+            field_name, "похоже на неверный номер телефона (ожидается 10-11 цифр)."
+        )
+    return "+" + digits
 
 
 def _validate_telegram(value: str, field_name: str) -> str:
@@ -145,10 +155,19 @@ def _validate_dept_code(value: str, field_name: str) -> str:
 
 
 def _validate_number_range(value: str, field_name: str, lo: float, hi: float, label: str) -> str:
+    """Число в разумных пределах.
+
+    Берётся ПЕРВОЕ число из строки, а не склейка всех цифр подряд. Прежний
+    вариант удалял из строки всё, кроме цифр, из-за чего «42-43» про размер
+    обуви превращалось в 4243, а «180 см, 75 кг» — в 18075, и валидатор
+    честно сообщал, что такого не бывает. Люди же пишут диапазоны и
+    добавляют единицы измерения постоянно."""
     v = _require_nonempty(value, field_name, 16)
-    digits = re.sub(r"[^\d.,]", "", v).replace(",", ".")
+    match = re.search(r"\d+(?:[.,]\d+)?", v)
+    if not match:
+        raise FieldValidationError(field_name, f"{label} должен быть числом.")
     try:
-        num = float(digits)
+        num = float(match.group(0).replace(",", "."))
     except ValueError:
         raise FieldValidationError(field_name, f"{label} должен быть числом.")
     if not (lo <= num <= hi):

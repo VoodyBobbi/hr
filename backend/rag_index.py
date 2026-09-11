@@ -6,6 +6,26 @@ import faiss
 import numpy as np
 
 
+def write_atomic(path: str, write_fn) -> None:
+    """Записывает файл атомарно: сначала во временный, потом переименование.
+
+    os.replace на уровне файловой системы неделим — файл по пути path в
+    любой момент либо старый целиком, либо новый целиком, промежуточного
+    состояния не существует. Без этого при пересборке индекса возникало
+    короткое окно, когда файл уже создан, но ещё не дописан: попавший в него
+    запрос кандидата падал бы с технической ошибкой 500 вместо ответа."""
+    tmp_path = path + ".tmp"
+    try:
+        write_fn(tmp_path)
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 def write_index(index: faiss.Index, path: str) -> None:
     """Сохраняет FAISS-индекс на диск.
 
@@ -23,8 +43,12 @@ def write_index(index: faiss.Index, path: str) -> None:
     запись самих байт через open() использует Unicode-путь-совместимый
     Python I/O и не подвержена этой проблеме."""
     chunk = faiss.serialize_index(index)
-    with open(path, "wb") as f:
-        f.write(chunk.tobytes())
+
+    def _write(target):
+        with open(target, "wb") as f:
+            f.write(chunk.tobytes())
+
+    write_atomic(path, _write)
 
 
 def load_index(index_path: str, meta_path: str) -> Tuple[faiss.Index, np.ndarray]:

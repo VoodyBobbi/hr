@@ -56,6 +56,7 @@ ANOMALOUS_LENGTH_POINTS = 1
 # ПЛОТНОСТЬЮ во времени — затухание как раз это и выражает.
 POINT_DECAY_SECONDS = 20.0
 
+
 _lock = threading.Lock()
 
 # key -> {"last_message": str, "last_time": float, "points": float, "blocked_until": float}
@@ -67,10 +68,15 @@ def _key(source: str, external_id: str) -> str:
 
     Что подставляется вторым аргументом, решает вызывающий код, и это разное
     для двух каналов: Telegram передаёт chat_id (подделать его пользователь
-    не может), а сайт — IP-адрес. Сайт раньше передавал session_id, но сессию
-    выдаёт сам сервер любому запросу без cookie: достаточно было не хранить
-    cookie, чтобы на каждое сообщение получать чистый счётчик и обходить
-    защиту целиком (см. backend/app.py)."""
+    не может), сайт — идентификатор сессии браузера.
+
+    По IP-адресу сайт НЕ считает намеренно: за одним внешним адресом сидят
+    офис с общим интернетом, кафе с бесплатным Wi-Fi или целый район на NAT
+    мобильного оператора. Их сообщения сливаются в один плотный поток, и
+    счётчик блокировал бы сразу всех за то, чего никто не делал. От обхода
+    через очистку cookie защищает отдельный лимит запросов в минуту с одного
+    IP (slowapi, см. backend/app.py) — он ограничивает ущерб, не выключая
+    бота для целой сети."""
     return f"{source}:{external_id}"
 
 
@@ -89,7 +95,8 @@ def is_blocked(source: str, external_id: str) -> tuple[bool, float]:
         return False, 0.0
 
 
-def record_message(source: str, external_id: str, message: str) -> None:
+def record_message(source: str, external_id: str, message: str,
+                   block_threshold: int = BLOCK_THRESHOLD) -> None:
     """Начисляет баллы за текущее сообщение и, если порог достигнут,
     устанавливает блокировку.
 
@@ -138,6 +145,29 @@ def record_message(source: str, external_id: str, message: str) -> None:
         entry["last_message"] = message
         entry["last_time"] = now
 
-        if entry["points"] >= BLOCK_THRESHOLD:
+        if entry["points"] >= block_threshold:
             entry["blocked_until"] = now + BLOCK_DURATION_MINUTES * 60
             entry["points"] = 0.0
+
+
+def in_anketa(source: str, external_id: str) -> bool:
+    """True, если собеседник сейчас заполняет анкету.
+
+    На время анкеты счётчик спама отключается (см. app.py и telegram_bot.py).
+    Причина: шаги анкеты обрабатывает обычный код, GigaChat не вызывается, и
+    денег такие сообщения не стоят — защищать тут нечего. Зато мешает счётчик
+    сильно: кандидат вставляет данные из буфера обмена, отправляет две части
+    подряд, дважды жмёт «Отправить», решив что не ушло, — и получает
+    блокировку на середине анкеты, теряя нить.
+
+    Импорт внутри функции, а не сверху файла: candidates тянет за собой
+    шифрование и работу с файлами, а rate_limiting должен оставаться
+    лёгким модулем без тяжёлых зависимостей на уровне импорта."""
+    from . import anketa, candidates
+
+    candidate_id = candidates.find_candidate(source, external_id)
+    if not candidate_id:
+        return False
+    return candidates.get_stage(candidate_id) in (
+        anketa.STAGE_LAW, anketa.STAGE_FIELDS, anketa.STAGE_CONFIRM, anketa.STAGE_DELETE,
+    )

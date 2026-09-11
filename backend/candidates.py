@@ -57,6 +57,7 @@ FIELD_ORDER = [
     "Готовность к вахте, когда готов",
     "Факт ознакомления с ЗАКОНОМ",
     "Факт ознакомления с готовой карточкой",
+    "Этап диалога",
 ]
 
 _NORMALIZED_FIELDS = {f.strip().lower().replace("_", " "): f for f in FIELD_ORDER}
@@ -69,6 +70,17 @@ _SERVICE_FIELDS = {
     "ДАТА заполнения",
     "Факт ознакомления с ЗАКОНОМ",
     "Факт ознакомления с готовой карточкой",
+    # На каком шаге диалога сейчас кандидат. Хранится ЯВНО, а не выводится
+    # из текста предыдущего сообщения бота.
+    #
+    # Раньше шаг определялся сравнением last_bot_message с заготовленными
+    # фразами: last_bot_message.startswith("Проверьте, пожалуйста, все
+    # данные"). Это ломалось от любой правки текста — причём молча: бот
+    # переставал понимать, на каком он шаге, и показывал карточку по кругу.
+    # Именно так был устроен баг с невозможностью исправить поле.
+    #
+    # Значения см. в anketa.STAGE_*.
+    "Этап диалога",
 }
 
 # Ровно те 29 полей анкеты, которые модель обязана собрать перед CARD_CONFIRMED
@@ -297,17 +309,22 @@ def delete_candidate(candidate_id: str) -> dict:
         if removed_sessions:
             _save_sessions(sessions)
 
-    removed_conversations = []
-    removed_log_rows = 0
-    for key in removed_sessions:
-        source, _, external_id = key.partition(":")
+        # Удаление истории переписки и логов — ВНУТРИ той же блокировки.
+        # Раньше блокировка снималась раньше, и в промежуток между снятием и
+        # удалением файла кандидат успевал прислать сообщение — файл истории
+        # создавался заново уже после «удаления». Данные формально удалены, а
+        # фактически лежат на диске, что для 152-ФЗ недопустимо.
+        removed_conversations = []
+        removed_log_rows = 0
+        for key in removed_sessions:
+            source, _, external_id = key.partition(":")
 
-        conv_path = paths.conversation_path(source, external_id)
-        if os.path.exists(conv_path):
-            os.remove(conv_path)
-            removed_conversations.append(conv_path)
+            conv_path = paths.conversation_path(source, external_id)
+            if os.path.exists(conv_path):
+                os.remove(conv_path)
+                removed_conversations.append(conv_path)
 
-        removed_log_rows += logger.delete_logs_for_session(source, external_id)
+            removed_log_rows += logger.delete_logs_for_session(source, external_id)
 
     return {
         "candidate_id": candidate_id,
@@ -316,3 +333,18 @@ def delete_candidate(candidate_id: str) -> dict:
         "removed_conversations": removed_conversations,
         "removed_log_rows": removed_log_rows,
     }
+
+
+def get_stage(candidate_id: str) -> str:
+    """Текущий шаг диалога кандидата (anketa.STAGE_*). Пустая строка, если
+    карточки ещё нет или шаг не выставлялся."""
+    if not candidate_id:
+        return ""
+    return str(get_card(candidate_id).get("Этап диалога", "")).strip()
+
+
+def set_stage(candidate_id: str, stage: str) -> None:
+    """Запоминает шаг диалога. Вызывается каждый раз, когда бот переводит
+    кандидата на следующий шаг, — именно на это значение опирается
+    assistant._handle_anketa_turn при разборе следующего сообщения."""
+    set_field(candidate_id, "Этап диалога", stage)

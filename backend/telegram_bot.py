@@ -81,14 +81,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # slowapi. Вызовы ниже — быстрые операции над словарём в памяти (без
     # сети, без sleep — подтверждено замерами при разработке модуля), не
     # оборачиваются в asyncio.to_thread(), в отличие от get_answer() ниже.
-    is_blocked_now, _ = rate_limiting.is_blocked("telegram", chat_id)
+    # Во время анкеты счётчик не работает — см. rate_limiting.in_anketa.
+    in_anketa = await asyncio.to_thread(rate_limiting.in_anketa, "telegram", chat_id)
+
+    is_blocked_now, _ = (False, 0.0) if in_anketa else rate_limiting.is_blocked("telegram", chat_id)
     if is_blocked_now:
         await update.message.reply_text(
             "Вы отправляете сообщения слишком часто — пожалуйста, "
             "подождите немного и повторите."
         )
         return
-    rate_limiting.record_message("telegram", chat_id, user_message)
+    if not in_anketa:
+        rate_limiting.record_message("telegram", chat_id, user_message)
 
     try:
         # get_answer() — обычная (синхронная) функция: расшифровка анкет,
@@ -123,6 +127,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     await reply_long(update, answer)
+
+
+async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ответ на голосовое, фото, документ, стикер и прочее не-текстовое.
+
+    Раньше фильтр filters.TEXT просто отбрасывал такие сообщения, и бот
+    молчал. Человек присылал голосовое с вопросом или фото паспорта, не
+    получал НИЧЕГО в ответ и решал, что бот сломался, — после чего уходил.
+    Голосовыми в Telegram пользуются очень многие.
+
+    Распознавать речь мы не беремся, но сказать об этом обязаны."""
+    await update.message.reply_text(
+        "Я понимаю только текстовые сообщения — голосовые, фото и файлы, "
+        "к сожалению, прочитать не могу. Напишите, пожалуйста, текстом.\n\n"
+        "Документы присылать боту не нужно: всё необходимое вы предоставите "
+        "менеджеру и в отделе кадров."
+    )
 
 
 async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -186,6 +207,15 @@ def main():
     # намеренно: кнопка живёт в HR-группе, а проверку, что нажали именно
     # там, делает сам show_card.
     application.add_handler(CallbackQueryHandler(show_card, pattern=r"^card:"))
+    # Всё остальное в личных сообщениях: голос, фото, документы, стикеры.
+    # Регистрируется ПОСЛЕ текстового обработчика — Telegram отдаёт
+    # сообщение первому подходящему, и текст успевает перехватить тот.
+    application.add_handler(
+        MessageHandler(
+            ~filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+            handle_non_text,
+        )
+    )
 
     print("Telegram bot started. Press Ctrl+C to stop.")
     application.run_polling()

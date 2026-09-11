@@ -7,7 +7,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from .kb_chunker import kb_files, load_and_chunk as load_kb_chunks
-from .rag_index import load_faq_data, write_index
+from .rag_index import load_faq_data, write_atomic, write_index
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -149,7 +149,18 @@ def _build_faiss_from_items(items: List[dict], index_path: str, meta_path: str):
         ],
         dtype=object,
     )
-    np.save(meta_path, meta)
+    # Атомарно, как и сам индекс: иначе между записью двух файлов возникает
+    # окно, в котором индекс уже новый, а метаданные ещё старые.
+    #
+    # Пишем через ОТКРЫТЫЙ файловый объект, а не по имени: np.save,
+    # получив путь без расширения .npy, молча дописывает его сам. Временный
+    # файл называется "...npy.tmp", и np.save превратил бы его в
+    # "...npy.tmp.npy" — переименовывать было бы нечего.
+    def _save_meta(target):
+        with open(target, "wb") as f:
+            np.save(f, meta, allow_pickle=True)
+
+    write_atomic(meta_path, _save_meta)
 
     print(f"Индекс сохранён: {index_path} ({len(items)} элементов, {dim} измерений)")
 

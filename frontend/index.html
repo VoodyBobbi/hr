@@ -60,6 +60,15 @@ body{
   max-height:100%;
   display:grid;
   grid-template-columns:minmax(0,42fr) minmax(0,58fr);
+  /* grid-template-rows ОБЯЗАТЕЛЕН, и это была причина сразу двух багов.
+     Без него у сетки одна неявная строка размером auto — она растёт под
+     содержимое, а height:100% на контейнере её не удерживает. Лента
+     сообщений росла с каждым новым сообщением, вместе с ней росла вся
+     сетка, поле ввода уезжало вниз под панель задач, а фотография слева
+     пересчитывала cover под новую высоту и выглядела так, будто
+     «приближается» и съезжает. minmax(0,1fr) жёстко фиксирует строку по
+     высоте экрана, и внутри неё прокручивается только лента. */
+  grid-template-rows:minmax(0,1fr);
   overflow:hidden;
 }
 
@@ -164,8 +173,12 @@ h1{
 
 #chat{
   min-width:0;
+  /* min-height:0 нужен по той же причине: без него флекс-контейнер внутри
+     сетки отказывается сжиматься ниже размера своего содержимого. */
+  min-height:0;
   display:flex;
   flex-direction:column;
+  overflow:hidden;
   background:var(--pale);
 }
 
@@ -251,7 +264,7 @@ h1{
   /* Запас снизу. Панель задач Windows и панель жестов на телефонах
      перекрывают нижние пиксели окна браузера, и поле ввода оказывалось
      наполовину под ними. 22px + safe-area держат его выше края. */
-  padding-bottom:calc(22px + env(safe-area-inset-bottom));
+  padding-bottom:calc(28px + env(safe-area-inset-bottom));
   background:var(--paper);
   border-top:1px solid #DCE3E8;
 }
@@ -288,6 +301,7 @@ h1{
    маленьком экране разговор важнее презентации. */
 @media (max-width:900px){
   #shell{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}
+  #pitch{min-height:0}
   #pitch{
     padding:14px 16px;
     gap:10px;
@@ -427,9 +441,16 @@ async function ask(question){
       credentials: "include",
       body: JSON.stringify({ message: question })
     });
+    // Проверка response.ok обязательна. fetch считает успехом ЛЮБОЙ ответ
+    // сервера, включая 500 и 422 — без этой проверки код шёл дальше,
+    // data.answer оказывался undefined, и кандидат видел в чате буквальное
+    // слово "undefined", то есть явно сломанного бота.
+    if (!response.ok) {
+      throw new Error("HTTP " + response.status);
+    }
     const data = await response.json();
     waiting.remove();
-    addMessage(data.answer, "bot");
+    addMessage(data.answer || "Пустой ответ сервера. Попробуйте ещё раз.", "bot");
   } catch (err) {
     // Кандидату не показываем технических подробностей: для него разницы
     // между упавшей сетью и непонятым вопросом нет, а текст ошибки только

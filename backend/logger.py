@@ -6,6 +6,7 @@ from typing import Optional
 
 from . import crypto_utils
 from . import paths
+from .filelock import cross_process_lock
 
 # Логи хранят полный текст переписки кандидата — те же персональные данные,
 # что и анкета, только неструктурированные (кандидат может упомянуть что
@@ -45,6 +46,10 @@ LOGS_DIR = paths.LOGS_DIR
 LOG_PATH = os.path.join(LOGS_DIR, "logs.csv")
 LOGS_RETENTION_DAYS = int(os.getenv("LOGS_RETENTION_DAYS", "90"))
 
+# threading.Lock защищает от параллельных ПОТОКОВ одного процесса. Сайт и
+# Telegram-бот — разные процессы ОС (см. run_all.py), между ними он не
+# работает, поэтому операции записи и удаления дополнительно берут
+# блокировку средствами ОС (backend/filelock.py), как и candidates.csv.
 _lock = threading.Lock()
 
 FIELDNAMES = [
@@ -127,7 +132,7 @@ def _ensure_header_up_to_date():
     if existing_header == FIELDNAMES:
         return  # шапка уже актуальна
 
-    with _lock:
+    with _lock, cross_process_lock(LOG_PATH):
         with open(LOG_PATH, "r", newline="", encoding="utf-8-sig") as f:
             rows = list(csv.DictReader(f))
 
@@ -170,7 +175,7 @@ def log_interaction(source: str, external_id: str, query: str, response: str,
         "Кешировано токенов": cached_tokens if cached_tokens is not None else "",
     }
 
-    with _lock:
+    with _lock, cross_process_lock(LOG_PATH):
         with open(LOG_PATH, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
             if not file_exists:
@@ -245,7 +250,7 @@ def _remove_rows_matching(should_remove) -> int:
     if not os.path.exists(LOG_PATH):
         return 0
 
-    with _lock:
+    with _lock, cross_process_lock(LOG_PATH):
         with open(LOG_PATH, "r", newline="", encoding="utf-8-sig") as f:
             rows = list(csv.DictReader(f))
 

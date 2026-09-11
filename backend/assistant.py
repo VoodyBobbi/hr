@@ -24,6 +24,7 @@ from . import crypto_utils
 from . import logger
 from . import notifications
 from . import paths
+from .validators import FieldValidationError
 
 load_dotenv()
 
@@ -96,7 +97,46 @@ WATCHED_FILES = [AGENT_PROMPT_PATH, INDEX_PATH, META_PATH, KB_INDEX_PATH, KB_MET
 
 MAX_HISTORY_MESSAGES = 20
 
-embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+# Модель эмбеддингов загружается ЛЕНИВО — при первом обращении, а не при
+# импорте модуля.
+#
+# Раньше здесь стояло embedding_model = SentenceTransformer(...), и модель
+# (около 470 МБ) читалась с диска в память в момент `import backend.assistant`.
+# Три следствия, все неприятные:
+#
+# 1. Приложение не импортировалось, пока модель не загрузится целиком.
+#    Для uvicorn это значит, что сервер не поднимается и не отвечает даже на
+#    /health — балансировщик на сервере считает такой сервис мёртвым, хотя
+#    он просто прогревается.
+# 2. Если модели не оказалось в кеше и до huggingface.co нет доступа, падал
+#    импорт, то есть всё приложение — из-за части, которая нужна только для
+#    поиска.
+# 3. При запуске через start.py модель какое-то время жила в памяти в двух
+#    экземплярах: свой был у build_index.py, который отрабатывает раньше.
+#
+# Теперь импорт лёгкий, сервер поднимается сразу, а модель подгружается на
+# первом вопросе кандидата (или раньше — при сборке индекса).
+_embedding_model = None
+_embedding_model_lock = threading.Lock()
+
+
+def get_embedding_model():
+    """Модель эмбеддингов, загруженная по требованию. Повторные вызовы
+    возвращают тот же объект.
+
+    Блокировка нужна на случай, когда два первых запроса пришли
+    одновременно: без неё оба начали бы грузить модель, и в памяти
+    ненадолго оказалось бы две копии по 470 МБ. Проверка внутри блокировки
+    повторяется намеренно — второй поток, дождавшийся своей очереди, должен
+    увидеть уже готовую модель, а не грузить её заново."""
+    global _embedding_model
+    if _embedding_model is None:
+        with _embedding_model_lock:
+            if _embedding_model is None:
+                print("[assistant] Загружаю модель поиска, это разовая операция...")
+                _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+                print("[assistant] Модель поиска готова.")
+    return _embedding_model
 
 _state_lock = threading.RLock()
 _state = {
@@ -247,7 +287,7 @@ def embed_text(text: str) -> np.ndarray:
     ВАЖНО: менять этот флаг в одиночку нельзя — индекс и запрос должны
     строиться одинаково. При изменении поднимите EMBEDDING_VERSION в
     build_index.py, чтобы индекс гарантированно пересобрался."""
-    vector = embedding_model.encode([text], convert_to_numpy=True, normalize_embeddings=True)
+    vector = get_embedding_model().encode([text], convert_to_numpy=True, normalize_embeddings=True)
     return vector.astype("float32")
 
 
@@ -398,168 +438,105 @@ def _process_markers(raw_text: str) -> tuple[str, bool]:
 def _handle_anketa_turn(source: str, external_id: str,
                         user_message: str, last_bot_message: str,
                         anketa_start_requested: bool = False):
-    """Обрабатывает один ход диалога в рамках анкеты — согласие 152-ФЗ,
-    сбор 29 полей, подтверждение готовой карточки, команду удаления.
+    """Обрабатывает один ход диалога в рамках анкеты.
 
-    anketa_start_requested — True, если ИМЕННО в предыдущем ответе GigaChat
-    поставила маркер START_ANKETA (см. _process_markers/get_answer) — то
-    есть кандидат только что согласился начать анкету в обычном диалоге.
-    Без этого флага функция НЕ инициирует показ текста согласия 152-ФЗ сама
-    по себе — иначе ЛЮБОЕ первое сообщение любого нового кандидата (даже
-    простой вопрос "какие у вас вакансии?") сразу превращалось бы в анкету,
-    минуя обычный FAQ-диалог, для которого GigaChat как раз и нужна.
+    Шаг диалога берётся из карточки кандидата (candidates.get_stage), а НЕ
+    угадывается по тексту предыдущего сообщения бота. Раньше переходы были
+    завязаны на точные фразы вроде startswith("Проверьте, пожалуйста, все
+    данные"): любая косметическая правка текста молча ломала логику, а
+    вдобавок делала невозможным исправление поля — после подсказки «назовите
+    поле и значение» фраза уже не совпадала, и бот показывал карточку по
+    кругу, бесконечно.
 
-    Возвращает готовый текст ответа кандидату, если сообщение было
-    обработано анкетной веткой — в этом случае GigaChat НЕ вызывается вообще
-    для ЭТОГО хода, вызывающий код (get_answer) сразу отдаёт этот текст.
+    last_bot_message оставлен в сигнатуре только ради одного случая: самый
+    первый показ текста согласия 152-ФЗ, когда карточки ещё нет и хранить
+    шаг физически негде.
 
-    Возвращает None, если анкетная ветка кандидата не касается — согласие
-    ещё не запрошено (обычный диалог продолжается через GigaChat) либо уже
-    дано и карточка уже подтверждена (тоже обычный диалог).
-
-    Принимает source/external_id, а не готовый candidate_id: карточка
-    кандидата теперь СОЗДАЁТСЯ ТОЛЬКО В МОМЕНТ СОГЛАСИЯ по 152-ФЗ, а не при
-    первом же сообщении. Раньше get_answer заводил строку в candidates.csv
-    любому, кто написал боту хоть слово, — таблица зарастала пустыми
-    карточками случайных посетителей, а с точки зрения 152-ФЗ это был сбор
-    данных до получения согласия.
+    Возвращает текст ответа, если ход обработан анкетной веткой (GigaChat в
+    этом случае не вызывается вообще), либо None — значит идёт обычный
+    диалог.
     """
     candidate_id = candidates.find_candidate(source, external_id)
-    law_given = bool(candidate_id) and candidates.is_law_acknowledged(candidate_id)
+    stage = candidates.get_stage(candidate_id) if candidate_id else anketa.STAGE_NONE
 
-    # Ждём подтверждения удаления: ПРЕДЫДУЩИМ ответом бота было именно
-    # предупреждение об удалении (DELETE_CONFIRMATION_PROMPT) — значит
-    # сейчас кандидат либо подтверждает, либо нет. Проверяется в первую
-    # очередь, до всего остального: команда удаления имеет приоритет над
-    # обычным ходом анкеты на любом её шаге.
-    if candidate_id and last_bot_message.endswith(anketa.DELETE_CONFIRMATION_PROMPT):
+    # --- Карточки ещё нет: согласие 152-ФЗ ---
+    if not candidate_id:
+        if last_bot_message.endswith(anketa.LAW_CONSENT_TEXT):
+            return _handle_law_answer(source, external_id, user_message)
+        if anketa_start_requested:
+            return anketa.LAW_CONSENT_TEXT
+        return None
+
+    # --- Подтверждение удаления данных ---
+    if stage == anketa.STAGE_DELETE:
         if anketa.is_delete_confirmed(user_message):
             candidates.delete_candidate(candidate_id)
             return anketa.DELETE_DONE_MESSAGE
-        # Не подтвердил явно — кандидат передумал удалять. Сама фраза
-        # отказа ("не, погоди, продолжим") НЕ является ответом на текущий
-        # вопрос анкеты — раньше здесь код "проваливался" в обычную
-        # обработку с этой же фразой, что приводило к попытке сохранить её
-        # как значение поля (например "Отчество: не, погоди, продолжим",
-        # отклонённое валидатором с непонятной для кандидата ошибкой).
-        # Вместо этого явно повторяем вопрос текущего поля — ничего не
-        # было тронуто на шаге предупреждения, продолжаем с того же места.
+        # Передумал удалять — возвращаем на тот шаг, где прервались.
+        if candidates.is_card_complete(candidate_id):
+            candidates.set_stage(candidate_id, anketa.STAGE_CONFIRM)
+            return anketa.format_card_for_confirmation(candidate_id)
+        candidates.set_stage(candidate_id, anketa.STAGE_FIELDS)
         next_step = anketa.get_next_step(candidate_id)
-        if next_step:
-            return next_step[1]
-        return anketa.format_card_for_confirmation(candidate_id)
+        return next_step[1] if next_step else anketa.format_card_for_confirmation(candidate_id)
 
-    # Команда удаления может прозвучать на любом шаге анкеты (кандидат
-    # передумал на середине заполнения) — проверяется до состояний ниже.
-    # Условие: согласие уже дано (иначе анкеты как таковой ещё нет, удалять
-    # пока нечего) И карточка ещё не подтверждена (после подтверждения — это
-    # уже обычный диалог, там команда удаления этой веткой не
-    # перехватывается).
-    if law_given and not _card_already_confirmed(candidate_id):
-        if anketa.is_delete_request(user_message):
-            return anketa.DELETE_CONFIRMATION_PROMPT
-
-    # Состояние 1: согласие 152-ФЗ ещё не получено.
-    if not law_given:
-        # endswith, а НЕ точное равенство. Текст согласия показывается
-        # кандидату СКЛЕЕННЫМ с ответом GigaChat ("Отлично, оформляем!" +
-        # текст согласия — см. get_answer), поэтому сравнение на равенство
-        # никогда не срабатывало, состояние не распознавалось, и анкета не
-        # начиналась вообще: кандидат отвечал "да", управление снова уходило
-        # в GigaChat, та опять ставила START_ANKETA, и текст согласия
-        # показывался по кругу. LAW_CONSENT_RETRY ниже тоже заканчивается
-        # этим же текстом, поэтому повторный вопрос не выбивает из состояния.
-        if last_bot_message.endswith(anketa.LAW_CONSENT_TEXT):
-            if anketa.is_law_declined(user_message):
-                # Явный отказ — анкету не начинаем, кандидат остаётся в
-                # обычном диалоге (FAQ и консультации по-прежнему доступны,
-                # см. get_answer ниже — там как раз обычный путь через
-                # GigaChat, просто анкета не заводится). Карточка при этом
-                # НЕ создаётся: отказавшийся кандидат не должен оставлять
-                # после себя строку в таблице персональных данных.
-                return (
-                    "Хорошо, анкету заполнять не будем. Если у вас есть "
-                    "вопросы о вакансиях — с радостью отвечу."
-                )
-            if not anketa.is_law_accepted(user_message):
-                # Ответ не разобран. Раньше согласием считалось ВСЁ, что не
-                # совпало со списком отказа, поэтому случайная реплика
-                # ("хм", "а сколько это займёт?") молча включала сбор
-                # паспортных данных. Согласие по 152-ФЗ должно быть явным,
-                # поэтому переспрашиваем.
-                return anketa.LAW_CONSENT_RETRY
-
-            # Явное согласие получено — вот теперь заводим карточку.
-            candidate_id = candidates.get_or_create_candidate(source, external_id)
-            candidates.mark_law_acknowledged(candidate_id)
-            first_step = anketa.get_next_step(candidate_id)
-            if first_step is None:
-                # Все поля уже заполнены (возможно только для карточки,
-                # созданной прежней версией кода) — сразу к подтверждению.
-                return anketa.format_card_for_confirmation(candidate_id)
-            return first_step[1]
-
+    # --- Согласие ещё не получено (карточка осталась от прежней версии) ---
+    if stage == anketa.STAGE_LAW or not candidates.is_law_acknowledged(candidate_id):
+        if last_bot_message.endswith(anketa.LAW_CONSENT_TEXT) or stage == anketa.STAGE_LAW:
+            return _handle_law_answer(source, external_id, user_message)
         if anketa_start_requested:
-            # GigaChat ИМЕННО СЕЙЧАС поставила START_ANKETA — кандидат
-            # только что согласился начать анкету в обычном диалоге.
-            # Показываем текст согласия впервые.
+            candidates.set_stage(candidate_id, anketa.STAGE_LAW)
             return anketa.LAW_CONSENT_TEXT
-
-        # Согласия не было запрошено — это НЕ анкетная ветка, обычный
-        # диалог продолжается через GigaChat (FAQ, вопросы про вакансии).
         return None
 
-    # Состояние 5: карточка уже подтверждена ранее — анкета кандидата закрыта,
-    # это НЕ анкетная ветка, дальше обычный диалог через GigaChat.
-    if _card_already_confirmed(candidate_id):
+    # --- Анкета уже принята: обычный диалог ---
+    if stage == anketa.STAGE_DONE or _card_already_confirmed(candidate_id):
         return None
 
-    # Состояние 3: все 29 полей заполнены, ждём подтверждения карточки.
-    if candidates.is_card_complete(candidate_id):
-        if last_bot_message.startswith("Проверьте, пожалуйста, все данные"):
-            if anketa.is_confirmation_yes(user_message):
-                candidates.mark_card_confirmed(candidate_id)
-                fresh_card = candidates.get_card(candidate_id)
-                # Кнопка раскрывает полную анкету по запросу HR — сами
-                # паспортные данные в ленту группы не публикуются, см.
-                # backend/notifications.py:format_full_card.
-                notifications.send_hr_notification(
-                    notifications.format_new_candidate_notification(fresh_card),
-                    buttons=[{
-                        "text": "Показать все данные кандидата",
-                        "callback_data": f"card:{candidate_id}",
-                    }],
-                )
-                return (
-                    "Спасибо! Анкета принята, с вами свяжется наш менеджер. "
-                    "Если появятся вопросы — я на связи."
-                )
-            # Не "да" — считаем, что кандидат хочет что-то поправить, но у
-            # нас нет ИИ, чтобы понять, что именно он имеет в виду свободным
-            # текстом (это и есть сама суть отказа от GigaChat внутри
-            # анкеты) — просим прямо назвать поле.
-            return (
-                "Если нужно что-то исправить — назовите поле и новое "
-                "значение, например: «Телефон 89991234567». Если всё "
-                "верно — напишите «да»."
+    # Команда удаления доступна на любом шаге незавершённой анкеты.
+    if anketa.is_delete_request(user_message):
+        candidates.set_stage(candidate_id, anketa.STAGE_DELETE)
+        return anketa.DELETE_CONFIRMATION_PROMPT
+
+    # --- Показана карточка, ждём подтверждения или правки ---
+    if stage == anketa.STAGE_CONFIRM:
+        if anketa.is_confirmation_yes(user_message):
+            candidates.mark_card_confirmed(candidate_id)
+            candidates.set_stage(candidate_id, anketa.STAGE_DONE)
+            fresh_card = candidates.get_card(candidate_id)
+            notifications.send_hr_notification(
+                notifications.format_new_candidate_notification(fresh_card),
+                buttons=[{
+                    "text": "Показать все данные кандидата",
+                    "callback_data": f"card:{candidate_id}",
+                }],
             )
-        return anketa.format_card_for_confirmation(candidate_id)
+            return (
+                "Спасибо, анкета принята! С вами свяжется менеджер — обсудит "
+                "детали и купит билет до места обучения. Если появятся "
+                "вопросы, пишите, я на связи."
+            )
 
-    # Состояние 2: основной цикл сбора полей.
-    #
-    # Если мы дошли до этой точки — согласие уже получено (иначе вернулись
-    # бы в состоянии 1 выше), карточка ещё не полностью заполнена (иначе
-    # ушли бы в состояние 3 выше) — значит user_message по построению
-    # ВСЕГДА является ответом на текущее незаполненное поле (next_step),
-    # каким бы ни было предыдущее сообщение бота: сам вопрос, или текст
-    # ошибки валидации ("не похоже на фамилию") после неудачной попытки —
-    # в обоих случаях кандидат сейчас отвечает на один и тот же вопрос,
-    # просто со второй/третьей попытки.
-    #
-    # Мета-вопрос "что я уже заполнил" — не значение поля, а вопрос о самом
-    # процессе. Проверяется до попытки сохранить как значение — иначе такой
-    # вопрос ошибочно интерпретировался бы как некорректный ответ на текущее
-    # поле (см. anketa.py:is_progress_question).
+        # Попытка исправить поле: «Телефон 89991234567».
+        correction = anketa.parse_correction(user_message)
+        if correction:
+            field, value = correction
+            try:
+                candidates.set_field(candidate_id, field, value)
+            except FieldValidationError as e:
+                return f"{e.message}\n\nНапишите это поле ещё раз, например: «{field} ...»"
+            return (
+                f"Исправил: {field} — {value}.\n\n"
+                + anketa.format_card_for_confirmation(candidate_id)
+            )
+
+        return (
+            "Если нужно что-то исправить — назовите поле и новое значение, "
+            "например: «Телефон 89991234567» или «Рост 180». "
+            "Если всё верно — напишите «да»."
+        )
+
+    # --- Основной сбор полей ---
     if anketa.is_progress_question(user_message):
         return anketa.format_progress_answer(candidate_id)
 
@@ -568,11 +545,38 @@ def _handle_anketa_turn(source: str, external_id: str,
         field, _ = next_step
         ok, message = anketa.process_answer(candidate_id, field, user_message)
         if ok and message is None:
-            # Это было последнее из 29 полей — сразу показываем карточку.
+            candidates.set_stage(candidate_id, anketa.STAGE_CONFIRM)
             return anketa.format_card_for_confirmation(candidate_id)
         return message
 
-    return None
+    candidates.set_stage(candidate_id, anketa.STAGE_CONFIRM)
+    return anketa.format_card_for_confirmation(candidate_id)
+
+
+def _handle_law_answer(source: str, external_id: str, user_message: str):
+    """Разбор ответа на текст согласия 152-ФЗ.
+
+    Согласие должно быть ЯВНЫМ: непонятный ответ приводит к переспросу, а не
+    к молчаливому согласию по умолчанию. Карточка кандидата создаётся только
+    здесь, в момент фактического согласия, — отказавшийся не оставляет после
+    себя строки в таблице персональных данных."""
+    if anketa.is_law_declined(user_message):
+        return (
+            "Хорошо, анкету заполнять не будем. Если у вас есть вопросы "
+            "о вакансиях — с радостью отвечу."
+        )
+    if not anketa.is_law_accepted(user_message):
+        return anketa.LAW_CONSENT_RETRY
+
+    candidate_id = candidates.get_or_create_candidate(source, external_id)
+    candidates.mark_law_acknowledged(candidate_id)
+    candidates.set_stage(candidate_id, anketa.STAGE_FIELDS)
+
+    first_step = anketa.get_next_step(candidate_id)
+    if first_step is None:
+        candidates.set_stage(candidate_id, anketa.STAGE_CONFIRM)
+        return anketa.format_card_for_confirmation(candidate_id)
+    return first_step[1]
 
 
 def _card_already_confirmed(candidate_id: str) -> bool:
@@ -841,10 +845,19 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
             error_kind = "gigachat_unknown"
             print(f"[assistant] GigaChat: непредвиденная ошибка соединения. {e}")
 
-        if similar_items:
-            # Есть подходящий ответ в FAQ — отдаём его как обычный ответ по
-            # базе, без единого слова о том, что модель была недоступна.
-            raw_answer = similar_items[0]["answer"]
+        # Откат на базу знаний. similar_items здесь ВСЕГДА пуст — непустой
+        # результат FAQ-поиска вернул бы ответ гораздо раньше, до обращения к
+        # GigaChat. Раньше проверка стояла именно на similar_items, то есть
+        # ветка не срабатывала никогда, и кандидат при любом сбое модели
+        # получал безликую заглушку, хотя подходящий факт был найден.
+        #
+        # А вот kb_chunks к этому моменту непуст, если поиск по базе знаний
+        # что-то нашёл, — их и отдаём. Ответ получится суховатым, без
+        # пересказа модели, но по существу и с верными цифрами, что заметно
+        # лучше «не могу сформулировать». Ровно этот случай и был у вас,
+        # когда GigaChat падал на SSL-сертификате.
+        if kb_chunks:
+            raw_answer = "\n\n".join(chunk["answer"] for chunk in kb_chunks[:2])
         else:
             # В FAQ ничего релевантного не нашлось — честно, но БЕЗ
             # технических слов: как будто бот действительно не знает ответ,

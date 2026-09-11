@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- layout-v4 -->
 <title>Работа в ПОЛАТИ — вахта на промышленных объектах</title>
 <style>
 /* ---------------------------------------------------------------------
@@ -56,6 +57,20 @@ body{
 }
 
 #shell{
+  /* position:fixed прибивает раскладку к окну намертво.
+
+     Это не украшение, а страховка. До этого высота задавалась через
+     height:100% от body — цепочка, которую ломает что угодно: забытая
+     высота строки у сетки, неожиданно широкое сообщение, масштаб страницы
+     в браузере. Стоило цепочке порваться, и содержимое начинало распирать
+     страницу: поле ввода уезжало под панель задач, фон пересчитывался и
+     «приближался».
+
+     Фиксированный элемент вообще не участвует в расчёте высоты документа,
+     поэтому страница не может стать выше или шире экрана ни при каких
+     обстоятельствах. */
+  position:fixed;
+  inset:0;
   height:100%;
   max-height:100%;
   display:grid;
@@ -71,6 +86,33 @@ body{
   grid-template-rows:minmax(0,1fr);
   overflow:hidden;
 }
+
+/* Ни одна внутренняя часть не должна расширять свою колонку. */
+#pitch,#chat,#feed,#chips,/* Кнопки выбора ответа на текущий вопрос анкеты. Оформлены заметнее
+   подсказок: подсказка — это наводка «о чём можно спросить», а здесь
+   кандидат нажатием отвечает, и вариантов ровно столько, сколько
+   допустимо. */
+#options{
+  flex:none;
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  padding:0 clamp(16px,2vw,26px) 12px;
+}
+#options:empty{display:none}
+#options button{
+  font:inherit;
+  font-size:14px;
+  color:#fff;
+  background:var(--blue);
+  border:0;
+  border-radius:10px;
+  padding:10px 16px;
+  cursor:pointer;
+}
+#options button:hover{background:var(--sky)}
+
+#compose{max-width:100%;min-width:0}
 
 /* ======================= ЛЕВАЯ ЧАСТЬ: ПРЕДЛОЖЕНИЕ ==================== */
 
@@ -204,6 +246,7 @@ h1{
   flex:1 1 auto;
   min-height:0;
   overflow-y:auto;
+  overflow-x:hidden;
   overscroll-behavior:contain;
   padding:clamp(16px,2vw,26px);
   display:flex;
@@ -213,7 +256,7 @@ h1{
 }
 
 .msg{
-  max-width:min(72ch,86%);
+  max-width:86%;
   padding:11px 15px;
   font-size:15px;
   line-height:1.5;
@@ -255,6 +298,30 @@ h1{
   cursor:pointer;
 }
 #chips button:hover{border-color:var(--sky);color:var(--sky)}
+
+/* Кнопки выбора ответа на текущий вопрос анкеты. Оформлены заметнее
+   подсказок: подсказка — это наводка «о чём можно спросить», а здесь
+   кандидат нажатием отвечает, и вариантов ровно столько, сколько
+   допустимо. */
+#options{
+  flex:none;
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  padding:0 clamp(16px,2vw,26px) 12px;
+}
+#options:empty{display:none}
+#options button{
+  font:inherit;
+  font-size:14px;
+  color:#fff;
+  background:var(--blue);
+  border:0;
+  border-radius:10px;
+  padding:10px 16px;
+  cursor:pointer;
+}
+#options button:hover{background:var(--sky)}
 
 #compose{
   flex:none;
@@ -387,6 +454,8 @@ h1{
       <button type="button">Хочу оставить заявку</button>
     </div>
 
+    <div id="options"></div>
+
     <form id="compose" autocomplete="off">
       <input id="text" type="text" maxlength="2000" placeholder="Напишите вопрос о работе" aria-label="Ваш вопрос">
       <button id="send" type="submit" aria-label="Отправить">&#10148;</button>
@@ -403,6 +472,7 @@ const form  = document.getElementById("compose");
 const text  = document.getElementById("text");
 const send  = document.getElementById("send");
 const chips = document.getElementById("chips");
+const optionsBox = document.getElementById("options");
 
 function addMessage(body, who){
   const el = document.createElement("div");
@@ -419,6 +489,25 @@ addMessage(
   "bot"
 );
 
+// Кнопки с вариантами ответа на текущий вопрос анкеты. Сервер присылает их
+// в поле options — если список пуст, кнопки убираются и остаётся обычный
+// ввод. Строка ввода при этом не блокируется: кандидат вправе ответить
+// своими словами, кнопки лишь избавляют от набора текста на телефоне.
+function showOptions(list){
+  optionsBox.innerHTML = "";
+  if (!Array.isArray(list) || list.length === 0) return;
+  list.forEach(function(label){
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.addEventListener("click", function(){
+      optionsBox.innerHTML = "";
+      ask(label);
+    });
+    optionsBox.appendChild(button);
+  });
+}
+
 let busy = false;
 
 async function ask(question){
@@ -428,6 +517,7 @@ async function ask(question){
 
   addMessage(question, "me");
   text.value = "";
+  optionsBox.innerHTML = "";
   const waiting = addMessage("Печатает…", "bot wait");
 
   try {
@@ -451,6 +541,7 @@ async function ask(question){
     const data = await response.json();
     waiting.remove();
     addMessage(data.answer || "Пустой ответ сервера. Попробуйте ещё раз.", "bot");
+    showOptions(data.options);
   } catch (err) {
     // Кандидату не показываем технических подробностей: для него разницы
     // между упавшей сетью и непонятым вопросом нет, а текст ошибки только

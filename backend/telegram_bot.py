@@ -2,7 +2,7 @@ import asyncio
 import os
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -13,6 +13,7 @@ from telegram.ext import (
 )
 
 from .assistant import get_answer
+from . import anketa
 from . import candidates
 from . import notifications
 from . import rate_limiting
@@ -58,11 +59,36 @@ def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list:
     return parts
 
 
-async def reply_long(update: Update, text: str) -> None:
+async def reply_long(update: Update, text: str, options: list | None = None) -> None:
     """reply_text с учётом лимита длины: отправляет ответ одним или
-    несколькими сообщениями подряд."""
-    for part in split_message(text):
+    несколькими сообщениями подряд.
+
+    options — варианты ответа на текущий вопрос анкеты. Показываются
+    клавиатурой под полем ввода: на телефоне нажать кнопку заметно проще,
+    чем набирать «Промышленный альпинист», а в таблицу попадает ровно одно
+    из допустимых значений, а не десяток вариантов написания одного и того
+    же. Клавиатура ставится только на ПОСЛЕДНЕЕ сообщение — если ответ
+    разбит на части, кнопки должны быть внизу, под вопросом.
+
+    Когда вариантов нет, клавиатура явно убирается (ReplyKeyboardRemove):
+    иначе кнопки от предыдущего вопроса остались бы висеть и сбивали с
+    толку на следующем, где нужен свободный ввод."""
+    parts = split_message(text)
+    for part in parts[:-1]:
         await update.message.reply_text(part)
+
+    if options:
+        # one_time_keyboard — клавиатура прячется сразу после нажатия.
+        # resize_keyboard — кнопки по высоте текста, а не в пол-экрана.
+        markup = ReplyKeyboardMarkup(
+            [[option] for option in options],
+            one_time_keyboard=True,
+            resize_keyboard=True,
+        )
+    else:
+        markup = ReplyKeyboardRemove()
+
+    await update.message.reply_text(parts[-1], reply_markup=markup)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -126,7 +152,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "свяжитесь с менеджером напрямую."
         )
 
-    await reply_long(update, answer)
+    # Варианты запрашиваются ПОСЛЕ get_answer: анкета уже перешла к
+    # следующему полю, значит кнопки будут к тому вопросу, который кандидат
+    # видит в этом же сообщении.
+    candidate_id = await asyncio.to_thread(candidates.find_candidate, "telegram", chat_id)
+    options = await asyncio.to_thread(anketa.pending_field_options, candidate_id)
+
+    await reply_long(update, answer, options)
 
 
 async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE):

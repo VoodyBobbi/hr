@@ -12,6 +12,8 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from .assistant import get_answer
+from . import anketa
+from . import candidates
 from . import rate_limiting
 
 load_dotenv()
@@ -111,43 +113,62 @@ app.state.limiter = limiter
 SESSION_COOKIE_NAME = "session_id"
 SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # год — анкету можно дозаполнить и через полгода
 
-# --- SameSite и Secure: теперь настраиваются, а не зашиты в код -----------
+# --- Secure и SameSite у cookie сессии ------------------------------------
 #
-# SameSite=Lax (значение по умолчанию) правильно ровно до тех пор, пока чат
-# живёт на том же домене, что и сервер. Если виджет встроить на сайт компании,
-# а бота держать на отдельном домене или поддомене, запрос к /chat становится
-# cross-site, браузер cookie с Lax к нему НЕ приложит, и каждое сообщение
-# начнёт новую сессию: диалог не помнится, анкета начинается заново.
+# Обе настройки ВЫВОДЯТСЯ САМИ из ALLOWED_ORIGINS, потому что там уже
+# записано всё нужное: по какому адресу открывается сайт и на том же он
+# домене, что сервер, или на другом. Отдельных переменных в .env для этого
+# больше нет — они только множили способы ошибиться, а ошибка в них
+# проявлялась неочевидно: бот переставал помнить диалог, и понять почему
+# было невозможно.
 #
-# Для такого размещения нужен SameSite=None, и тогда браузер ТРЕБУЕТ Secure —
-# поэтому ниже он включается принудительно, что бы ни стояло в .env.
+# Secure означает «отправлять cookie только по HTTPS». Если его включить на
+# сайте, открытом по обычному http://localhost, браузер cookie просто не
+# сохранит — каждое сообщение станет новой сессией, и анкета будет
+# начинаться заново.
 #
-# SESSION_COOKIE_SECURE=false существует ровно для одного случая: локальная
-# проверка по http://localhost без сертификата (в том числе docker compose up,
-# который поднимает сайт именно по http). В любом сетевом развёртывании
-# оставляйте true: cookie в открытом HTTP-трафике перехватывается в той же
-# сети, и чужой человек продолжит диалог от имени кандидата.
-SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "lax").strip().lower()
-if SESSION_COOKIE_SAMESITE not in ("lax", "strict", "none"):
-    print(
-        f"[app] SESSION_COOKIE_SAMESITE={SESSION_COOKIE_SAMESITE!r} — недопустимое "
-        f"значение (ожидается lax, strict или none). Использую lax."
-    )
-    SESSION_COOKIE_SAMESITE = "lax"
+# Поэтому правило простое: все адреса локальные и по http — Secure
+# выключаем, иначе включаем. На сервере с настоящим доменом он включится
+# сам, забыть про это невозможно.
+def _looks_local(origin: str) -> bool:
+    origin = origin.strip().lower()
+    if origin.startswith("https://"):
+        return False
+    return "localhost" in origin or "127.0.0.1" in origin or "0.0.0.0" in origin
 
-SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "true").strip().lower() not in ("0", "false", "no")
 
+_all_local = bool(ALLOWED_ORIGINS) and all(_looks_local(o) for o in ALLOWED_ORIGINS)
+
+# SameSite=None нужен, только если чат встроен на сайт с ДРУГИМ доменом,
+# чем сервер бота: браузер иначе не приложит cookie к такому запросу.
+# Определяем по тому, есть ли среди разрешённых адресов внешний домен.
+_has_external = any(not _looks_local(o) for o in ALLOWED_ORIGINS)
+
+SESSION_COOKIE_SECURE = not _all_local
+SESSION_COOKIE_SAMESITE = "none" if (_has_external and SESSION_COOKIE_SECURE) else "lax"
+
+# Переменные окружения всё ещё имеют приоритет — как аварийный рычаг для
+# нестандартного развёртывания (например, HTTPS обеспечивает внешний прокси,
+# а сам контейнер об этом не знает). В .env.example они намеренно не
+# описаны: в обычной работе трогать их не нужно.
+if os.getenv("SESSION_COOKIE_SECURE"):
+    SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE").strip().lower() not in ("0", "false", "no")
+if os.getenv("SESSION_COOKIE_SAMESITE"):
+    SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE").strip().lower()
+    if SESSION_COOKIE_SAMESITE not in ("lax", "strict", "none"):
+        SESSION_COOKIE_SAMESITE = "lax"
+
+# Браузер отвергает SameSite=None без Secure — чиним молча, иначе cookie
+# не сохранится вообще ни при каких условиях.
 if SESSION_COOKIE_SAMESITE == "none" and not SESSION_COOKIE_SECURE:
-    print("[app] SameSite=None требует Secure — включаю Secure принудительно.")
     SESSION_COOKIE_SECURE = True
 
-if not SESSION_COOKIE_SECURE:
-    print(
-        "[app] ВНИМАНИЕ: cookie сессии выдаётся БЕЗ флага Secure "
-        "(SESSION_COOKIE_SECURE=false). Это допустимо только для локальной "
-        "проверки по http://localhost. Для любого сетевого развёртывания "
-        "верните true и поднимайте сайт по HTTPS."
-    )
+print(
+    f"[app] Cookie сессии: Secure={'вкл' if SESSION_COOKIE_SECURE else 'выкл'}, "
+    f"SameSite={SESSION_COOKIE_SAMESITE} "
+    f"({'локальный запуск по http' if _all_local else 'сетевое развёртывание'}, "
+    f"определено по ALLOWED_ORIGINS)."
+)
 
 
 def _set_session_cookie(response: Response, session_id: str) -> None:
@@ -212,9 +233,13 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    # options — варианты ответа для текущего вопроса анкеты. Фронтенд
+    # показывает их кнопками вместо поля ввода (см. frontend/index.html).
+    # Пустой список означает свободный ввод.
     answer: str
     context: list
     session_id: str
+    options: list[str] = []
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -277,7 +302,17 @@ def chat(request: Request, response: Response, body: ChatRequest,
     if is_new_session:
         _set_session_cookie(response, session_id)
 
-    return ChatResponse(answer=answer, context=list(similar_items), session_id=session_id)
+    # Варианты запрашиваются ПОСЛЕ get_answer: к этому моменту анкета уже
+    # перешла к следующему полю, и мы получаем кнопки именно к тому вопросу,
+    # который кандидат видит в ответе выше.
+    options = anketa.pending_field_options(candidates.find_candidate("site", session_id))
+
+    return ChatResponse(
+        answer=answer,
+        context=list(similar_items),
+        session_id=session_id,
+        options=options,
+    )
 
 
 @app.get("/health")

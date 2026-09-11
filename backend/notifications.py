@@ -62,6 +62,21 @@ def send_hr_notification(text: str, buttons: list | None = None) -> None:
     backend/telegram_bot.py (CallbackQueryHandler)."""
     token, chat_id = _settings()
     if not (token and chat_id):
+        # Раньше здесь стоял молчаливый return, и это оказалось худшим из
+        # возможных поведений: кандидат заполнял анкету до конца, HR не
+        # получал ничего, а в консоли не было ни строчки — искать было не с
+        # чего. Теперь чётко пишем, какой именно переменной не хватает.
+        missing = []
+        if not token:
+            missing.append("TELEGRAM_BOT_TOKEN")
+        if not chat_id:
+            missing.append("TELEGRAM_HR_GROUP_CHAT_ID")
+        print(
+            f"[notifications] Уведомление HR НЕ отправлено: в .env не заполнено "
+            f"{' и '.join(missing)}. Анкета кандидата при этом сохранена — "
+            f"её видно командой `python -m scripts.export_candidates`. "
+            f"Проверить настройку Telegram: `python -m scripts.check_telegram`."
+        )
         return
 
     url = _API_URL_TEMPLATE.format(token=token)

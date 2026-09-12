@@ -489,14 +489,22 @@ def _handle_anketa_turn(source: str, external_id: str,
             return anketa.LAW_CONSENT_TEXT
         return None
 
-    # --- Анкета уже принята: обычный диалог ---
-    if stage == anketa.STAGE_DONE or _card_already_confirmed(candidate_id):
-        return None
-
-    # Команда удаления доступна на любом шаге незавершённой анкеты.
+    # Команда удаления доступна ВСЕГДА, пока карточка существует, — в том
+    # числе после того, как анкета уже отправлена HR.
+    #
+    # Проверка стоит ВЫШЕ выхода в обычный диалог намеренно. Раньше она была
+    # ниже, и после подтверждения анкеты просьба «удали мои данные»
+    # проваливалась в GigaChat: та отвечала что-то общее, а данные
+    # оставались на месте. Именно этот момент важнее всего: право отозвать
+    # согласие по 152-ФЗ возникает как раз ПОСЛЕ передачи данных, а не до
+    # неё, и README прямо обещает кандидату такую возможность.
     if anketa.is_delete_request(user_message):
         candidates.set_stage(candidate_id, anketa.STAGE_DELETE)
         return anketa.DELETE_CONFIRMATION_PROMPT
+
+    # --- Анкета уже принята: дальше обычный диалог ---
+    if stage == anketa.STAGE_DONE or _card_already_confirmed(candidate_id):
+        return None
 
     # --- Показана карточка, ждём подтверждения или правки ---
     if stage == anketa.STAGE_CONFIRM:

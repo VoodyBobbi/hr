@@ -80,13 +80,19 @@ def _validate_phone(value: str, field_name: str) -> str:
     v = _require_nonempty(value, field_name, 32)
     digits = re.sub(r"\D", "", v)
 
-    if len(digits) == 11 and digits[0] in ("7", "8"):
+    if len(digits) == 12 and digits.startswith("375"):
+        # Беларусь. Компания набирает граждан РБ наравне с гражданами РФ —
+        # «Беларусь» есть кнопкой в вопросе о гражданстве, ИНН для них
+        # необязателен, — а телефон их же и не пускал. Оставляем как есть,
+        # к российскому виду не приводим.
+        pass
+    elif len(digits) == 11 and digits[0] in ("7", "8"):
         digits = "7" + digits[1:]
     elif len(digits) == 10:
         digits = "7" + digits
     else:
         raise FieldValidationError(
-            field_name, "похоже на неверный номер телефона (ожидается 10-11 цифр)."
+            field_name, "похоже на неверный номер телефона. Российский — 11 цифр (89991234567), белорусский — с кодом 375."
         )
     return "+" + digits
 

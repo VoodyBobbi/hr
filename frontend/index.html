@@ -7,7 +7,7 @@
      страницы, а не накрывай её сверху. Без этого поле ввода уезжало под
      клавиатуру, а вместе с ним разъезжалась вся раскладка. -->
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-<!-- layout-v6 -->
+<!-- layout-v7 -->
 <title>Работа в ПОЛАТИ — вахта на промышленных объектах</title>
 <style>
 /* ---------------------------------------------------------------------
@@ -231,7 +231,7 @@ h1{
   margin:0 clamp(16px,2vw,26px) 12px;
   padding:10px 12px 12px;
   background:var(--paper);
-  border:2px solid var(--ink);
+  border:1.5px solid #A9B7C2;
   border-radius:14px;
 }
 #options-wrap[hidden]{display:none}
@@ -263,9 +263,10 @@ h1{
   font:inherit;
   font-size:16px;              /* меньше 16px — iOS увеличивает страницу */
   padding:13px 14px;
-  /* Тёмный контур: чтобы сразу было видно, куда писать. Светлая рамка
-     терялась на светлом фоне, и поле не читалось как поле. */
-  border:2px solid var(--ink);
+  /* Самый сильный контур на экране — намеренно. Поле ввода это главное
+     действие, и оно должно выигрывать по заметности у всего остального,
+     включая блок с вариантами ответа (у того рамка тоньше и светлее). */
+  border:3px solid var(--ink);
   border-radius:11px;
   background:var(--paper);
   color:var(--ink);
@@ -419,7 +420,7 @@ h1{
 </div>
 
 <script>
-console.log("ПОЛАТИ · вёрстка layout-v6");
+console.log("ПОЛАТИ · вёрстка layout-v7");
 
 const API_URL = "/chat";
 
@@ -431,14 +432,25 @@ const chips       = document.getElementById("chips");
 const optionsWrap = document.getElementById("options-wrap");
 const optionsBox  = document.getElementById("options");
 
+// Прокрутка ленты к самому низу. Отдельной функцией, потому что вызывать
+// её нужно не только после нового сообщения, но и после появления блока с
+// вариантами ответа: блок забирает высоту у ленты уже ПОСЛЕ того, как
+// сообщение отрисовано, и последняя реплика оказывалась спрятанной под ним.
+// requestAnimationFrame — чтобы браузер успел пересчитать раскладку.
+function scrollToBottom(){
+  requestAnimationFrame(function(){
+    feed.scrollTop = feed.scrollHeight;
+  });
+}
+
 function addMessage(body, who){
   const el = document.createElement("div");
   el.className = "msg " + who;
   el.textContent = body;
   feed.appendChild(el);
-  // Прокрутка к последнему сообщению. Без неё после отправки человек видел
-  // старую часть переписки и не понимал, ушло его сообщение или нет.
-  feed.scrollTop = feed.scrollHeight;
+  // Без прокрутки после отправки человек видел старую часть переписки и не
+  // понимал, ушло его сообщение или нет.
+  scrollToBottom();
   return el;
 }
 
@@ -455,6 +467,7 @@ function showOptions(list){
   optionsBox.innerHTML = "";
   if (!Array.isArray(list) || list.length === 0){
     optionsWrap.hidden = true;
+    scrollToBottom();
     return;
   }
   list.forEach(function(label){
@@ -468,6 +481,7 @@ function showOptions(list){
     optionsBox.appendChild(button);
   });
   optionsWrap.hidden = false;
+  scrollToBottom();
 }
 
 let busy = false;

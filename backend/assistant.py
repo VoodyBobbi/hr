@@ -29,6 +29,9 @@ from .validators import FieldValidationError
 load_dotenv()
 
 GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS")
+
+# Сколько секунд ждать ответа нейросети, прежде чем считать вызов зависшим.
+GIGACHAT_TIMEOUT_SECONDS = float(os.getenv("GIGACHAT_TIMEOUT_SECONDS", "30"))
 if not GIGACHAT_CREDENTIALS:
     raise RuntimeError("GIGACHAT_CREDENTIALS is not set. Please set it in your .env file.")
 
@@ -159,9 +162,11 @@ def _get_mtimes() -> dict:
 # Слова, по которым видно, что кандидат ДЕЙСТВИТЕЛЬНО согласился начать
 # анкету. Проверяются перед тем, как принять маркер START_ANKETA от модели.
 _ANKETA_INTENT = (
-    "да", "давай", "давайте", "хочу", "готов", "готова", "согласен", "согласна",
-    "начнём", "начнем", "поехали", "оформля", "заполн", "анкет", "заявк",
-    "откликну", "устроит", "работать", "ок", "окей", "буду",
+    "да", "ага", "угу", "давай", "давайте", "хочу", "хочется", "готов", "готова",
+    "согласен", "согласна", "начнём", "начнем", "начинаем", "поехали", "оформляй",
+    "оформляйте", "оформляемся", "заполнить", "заполняем", "заполню", "анкету",
+    "анкета", "заявку", "заявка", "откликнуться", "отклик", "устроиться",
+    "ок", "окей", "буду", "валяй", "погнали", "конечно", "yes",
 )
 
 
@@ -171,13 +176,13 @@ def _user_really_asked_for_anketa(user_message: str) -> bool:
     Нужна потому, что GigaChat ставит маркер START_ANKETA слишком охотно.
     В боевом тесте кандидат спросил «Какие есть варианты?» — обычный вопрос
     о профессиях — а модель прислала маркер, и человеку вместо ответа
-    показали согласие на обработку персональных данных. Выглядело так,
-    будто бот силой тащит заполнять анкету, хотя его просто спросили.
+    показали согласие на обработку персональных данных.
 
-    Инструкция в промпте это запрещает, но полагаться только на инструкцию
-    нельзя: модель ошибается, а цена ошибки здесь высокая — кандидат уходит.
-    Поэтому маркер принимается, только если в сообщении кандидата есть хоть
-    какой-то знак согласия.
+    Сравнение идёт по ЦЕЛЫМ СЛОВАМ. Первая версия искала совпадение только
+    по началу слова, и это было хуже исходной болезни: «\bда» срабатывало
+    внутри «данные», «далеко», «даже», а «\bок» — внутри «окно» и «около».
+    Вопрос «расскажите про данные» запускал анкету. Зеркально не хватало
+    коротких форм согласия: кандидат отвечал «ага» — и анкета не начиналась.
 
     Вопросительный знак отменяет согласие: «хочу узнать, какие есть
     варианты?» — это вопрос, а не просьба оформляться."""
@@ -186,7 +191,8 @@ def _user_really_asked_for_anketa(user_message: str) -> bool:
         return False
     if text.endswith("?"):
         return False
-    return any(re.search(rf"\b{re.escape(w)}", text) for w in _ANKETA_INTENT)
+    words = set(re.findall(r"[\w-]+", text))
+    return any(w in words for w in _ANKETA_INTENT)
 
 
 def _format_kb_context(kb_chunks: list | None) -> str:
@@ -419,7 +425,11 @@ def _save_history(source: str, external_id: str, history: list):
 # полностью на стороне _handle_anketa_turn/anketa.py, GigaChat к этому не
 # возвращается, пока анкета не будет закрыта (см. get_answer).
 CLOSED_MARKER_PATTERN = re.compile(r"#{2,}\s*(START_ANKETA)\s*#{2,}", re.IGNORECASE)
-OPEN_MARKER_PATTERN = re.compile(r"#{2,}\s*(START_ANKETA)\s*#{0,}\s*(?=\n|$)", re.IGNORECASE)
+# Без "(?=\n|$)" на конце: раньше маркер вырезался, только если после него
+# в строке ничего не было. Стоило модели написать "###START_ANKETA вот
+# вопросы" — и маркер оставался в тексте, кандидат видел его глазами, а
+# анкета не начиналась.
+OPEN_MARKER_PATTERN = re.compile(r"#{2,}\s*(START_ANKETA)\s*#{0,}", re.IGNORECASE)
 
 # Модель иногда (по привычке из markdown) оборачивает маркер в тройные кавычки
 # ```...```, хотя промпт этого не просит. Сам маркер вырезается по паттернам
@@ -492,6 +502,24 @@ def _handle_anketa_turn(source: str, external_id: str,
     candidate_id = candidates.find_candidate(source, external_id)
     stage = candidates.get_stage(candidate_id) if candidate_id else anketa.STAGE_NONE
 
+    # Карточка с прежним набором полей: продолжать её нельзя, вопросы и
+    # сохранённые ответы разъехались. Предлагаем начать заново, вместо того
+    # чтобы молча сбиться на середине. Удаление при этом остаётся доступным.
+    # STAGE_DELETE исключён наравне с остальными: если человек уже попросил
+    # удалить данные и ему показали предупреждение, подтверждение «да, удали»
+    # должно сработать. Иначе удаление обрывалось на полпути сообщением про
+    # обновлённую форму, и данные оставались на диске.
+    if (candidate_id
+            and stage not in (anketa.STAGE_NONE, anketa.STAGE_DONE, anketa.STAGE_DELETE)
+            and candidates.is_outdated(candidate_id)
+            and not anketa.is_delete_request(user_message)):
+        candidates.set_stage(candidate_id, anketa.STAGE_DONE)
+        return (
+            "Извините, форма анкеты обновилась, и прежние ответы уже не "
+            "подходят. Давайте заполним заново — напишите «хочу оставить "
+            "заявку», это займёт несколько минут."
+        )
+
     # --- Карточки ещё нет: согласие 152-ФЗ ---
     if not candidate_id:
         if last_bot_message.endswith(anketa.LAW_CONSENT_TEXT):
@@ -505,6 +533,14 @@ def _handle_anketa_turn(source: str, external_id: str,
         if anketa.is_delete_confirmed(user_message):
             candidates.delete_candidate(candidate_id)
             return anketa.DELETE_DONE_MESSAGE
+
+        # Человек повторил просьбу вместо подтверждения: «удали мои данные»
+        # ещё раз. Люди так делают постоянно — перефразируют, а не читают
+        # инструкцию дословно. Раньше это считалось отказом от удаления, и
+        # кандидата возвращали в анкету, хотя он второй раз попросил стереть
+        # данные. Переспрашиваем, но с шага не уходим.
+        if anketa.is_delete_request(user_message):
+            return anketa.DELETE_CONFIRMATION_PROMPT
         # Передумал удалять — возвращаем на тот шаг, где прервались.
         if candidates.is_card_complete(candidate_id):
             candidates.set_stage(candidate_id, anketa.STAGE_CONFIRM)
@@ -515,6 +551,12 @@ def _handle_anketa_turn(source: str, external_id: str,
 
     # --- Согласие ещё не получено (карточка осталась от прежней версии) ---
     if stage == anketa.STAGE_LAW or not candidates.is_law_acknowledged(candidate_id):
+        # Просьба удалить данные работает и здесь. Раньше ветка согласия
+        # стояла раньше проверки удаления, и на этом шаге «удали мои данные»
+        # получало переспрос про 152-ФЗ вместо удаления.
+        if anketa.is_delete_request(user_message):
+            candidates.set_stage(candidate_id, anketa.STAGE_DELETE)
+            return anketa.DELETE_CONFIRMATION_PROMPT
         if last_bot_message.endswith(anketa.LAW_CONSENT_TEXT) or stage == anketa.STAGE_LAW:
             return _handle_law_answer(source, external_id, user_message)
         if anketa_start_requested:
@@ -541,6 +583,22 @@ def _handle_anketa_turn(source: str, external_id: str,
 
     # --- Показана карточка, ждём подтверждения или правки ---
     if stage == anketa.STAGE_CONFIRM:
+        # Разбор правки идёт ПЕРЕД проверкой согласия. «Да, но телефон
+        # 8999...» — это просьба исправить, а не подтверждение, хотя слово
+        # «да» в ней есть. Раньше такая фраза закрывала анкету со старым
+        # телефоном, и HR не мог дозвониться.
+        correction = anketa.parse_correction(user_message)
+        if correction:
+            field, value = correction
+            try:
+                candidates.set_field(candidate_id, field, value)
+            except FieldValidationError as e:
+                return f"{e.message}\n\nНапишите это поле ещё раз, например: «{field} ...»"
+            return (
+                f"Исправил: {field} — {value}.\n\n"
+                + anketa.format_card_for_confirmation(candidate_id)
+            )
+
         if anketa.is_confirmation_yes(user_message):
             candidates.mark_card_confirmed(candidate_id)
             candidates.set_stage(candidate_id, anketa.STAGE_DONE)
@@ -556,19 +614,6 @@ def _handle_anketa_turn(source: str, external_id: str,
                 "Спасибо, анкета принята! С вами свяжется менеджер — обсудит "
                 "детали и купит билет до места обучения. Если появятся "
                 "вопросы, пишите, я на связи."
-            )
-
-        # Попытка исправить поле: «Телефон 89991234567».
-        correction = anketa.parse_correction(user_message)
-        if correction:
-            field, value = correction
-            try:
-                candidates.set_field(candidate_id, field, value)
-            except FieldValidationError as e:
-                return f"{e.message}\n\nНапишите это поле ещё раз, например: «{field} ...»"
-            return (
-                f"Исправил: {field} — {value}.\n\n"
-                + anketa.format_card_for_confirmation(candidate_id)
             )
 
         return (
@@ -657,9 +702,23 @@ _session_locks: dict[str, threading.Lock] = {}
 _session_locks_guard = threading.Lock()
 
 
+# Сколько замков держим в памяти. Замок — это несколько десятков байт, но
+# диалогов за годы работы накапливаются десятки тысяч, и словарь рос бы без
+# конца. Старые записи вычищаются: если диалог давно закончился, замок ему
+# больше не нужен, а если кандидат вернётся — создастся заново.
+_MAX_SESSION_LOCKS = 2000
+
+
 def _session_lock(source: str, external_id: str) -> threading.Lock:
     key = f"{source}:{external_id}"
     with _session_locks_guard:
+        if key not in _session_locks and len(_session_locks) >= _MAX_SESSION_LOCKS:
+            # Выбрасываем самые старые записи (dict в Python сохраняет
+            # порядок вставки). Замок, который кто-то прямо сейчас держит,
+            # при этом продолжает работать: объект жив, пока на него есть
+            # ссылка в работающем потоке.
+            for stale in list(_session_locks)[: _MAX_SESSION_LOCKS // 4]:
+                _session_locks.pop(stale, None)
         return _session_locks.setdefault(key, threading.Lock())
 
 
@@ -710,13 +769,26 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
     anketa_reply = _handle_anketa_turn(source, external_id, user_message, last_bot_message)
     if anketa_reply is not None:
         response_time_ms = int((time.time() - start_time) * 1000)
-        history.append({"role": MessagesRole.USER, "content": user_message})
-        history.append({"role": MessagesRole.ASSISTANT, "content": anketa_reply})
+
+        # Если ход оказался удалением данных — историю НЕ сохраняем.
+        #
+        # Иначе удаление получалось фиктивным: delete_candidate стирает файл
+        # переписки с диска, но в памяти этой функции уже лежит загруженная
+        # копия последних сообщений — с паспортом, СНИЛС и адресом. Строки
+        # ниже записали бы её обратно, и файл возрождался бы через
+        # миллисекунду после удаления. То есть ровно те данные, ради которых
+        # человек написал «удали», оставались бы на диске.
+        if anketa_reply == anketa.DELETE_DONE_MESSAGE:
+            history = []
+        else:
+            history.append({"role": MessagesRole.USER, "content": user_message})
+            history.append({"role": MessagesRole.ASSISTANT, "content": anketa_reply})
         # Обрезка истории, как и в остальных ветках ниже. Без неё файл
         # истории рос без ограничения все 29 шагов анкеты и дальше.
         history = history[-MAX_HISTORY_MESSAGES:]
-        with _history_lock:
-            _save_history(source, external_id, history)
+        if history:
+            with _history_lock:
+                _save_history(source, external_id, history)
         logger.log_interaction(source, external_id, user_message, anketa_reply, response_time_ms, "ok")
         return anketa_reply, []
 
@@ -845,7 +917,16 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
         # причина — setup.py не смог скачать сертификат автоматически
         # (например, недоступен gu-st.ru) и нужно установить его вручную,
         # см. https://developers.sber.ru/docs/ru/gigachat/certificates
-        with GigaChat(credentials=GIGACHAT_CREDENTIALS) as giga:
+        # timeout ОБЯЗАТЕЛЕН. По умолчанию библиотека ждёт ответа сколько
+        # угодно, и один зависший вызов держит рабочий процесс сервера
+        # занятым. Несколько таких подряд — и бот перестаёт отвечать всем,
+        # включая тех, чьи сообщения вообще не требуют нейросети.
+        #
+        # 30 секунд с запасом: в боевом логе самый долгий честный ответ
+        # занял 22,5 секунды. Всё, что дольше, почти наверняка зависание, а
+        # не медленный ответ — и лучше отдать кандидату запасной ответ из
+        # базы знаний, чем заставлять его смотреть в «Печатает…» минутами.
+        with GigaChat(credentials=GIGACHAT_CREDENTIALS, timeout=GIGACHAT_TIMEOUT_SECONDS) as giga:
             response = giga.chat(Chat(messages=messages))
         raw_answer = response.choices[0].message.content
         status = "ok"

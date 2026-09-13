@@ -2,33 +2,38 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<!-- layout-v4 -->
+<!-- interactive-widget=resizes-content — ключевая часть для телефона.
+     Говорит браузеру: когда открывается экранная клавиатура, УМЕНЬШИ область
+     страницы, а не накрывай её сверху. Без этого поле ввода уезжало под
+     клавиатуру, а вместе с ним разъезжалась вся раскладка. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<!-- layout-v6 -->
 <title>Работа в ПОЛАТИ — вахта на промышленных объектах</title>
 <style>
 /* ---------------------------------------------------------------------
-   ОДИН ЭКРАН БЕЗ ПРОКРУТКИ
+   ОДИН ЭКРАН, ПРОКРУЧИВАЕТСЯ ТОЛЬКО ПЕРЕПИСКА
 
-   Страница не прокручивается вообще: html и body фиксированы по высоте
-   экрана с overflow:hidden. Прокручивается ровно одна область — лента
-   сообщений (#feed). Это и есть требование «одна страница, не крутящаяся
-   вниз и вверх»: у страницы нет полосы прокрутки, у переписки — есть,
-   иначе длинный диалог было бы невозможно читать.
+   Мобильная версия переписана заново после боевого теста. Что было не так:
+   шапка не влезала по ширине и обрезала заголовок на полуслове, подсказки
+   висели поверх сообщений, а при открытии клавиатуры поле ввода улетало
+   в середину экрана.
 
-   100dvh, а не 100vh: на мобильных браузерах 100vh считается по высоте
-   окна БЕЗ учёта адресной строки, из-за чего нижняя часть экрана (у нас —
-   поле ввода) уезжает под неё. dvh учитывает реальную видимую область и
-   пересчитывается, когда строка прячется. 100vh оставлен запасным
-   значением для старых браузеров, не знающих dvh.
+   Две главные причины, обе устранены:
 
-   ЦВЕТА взяты из фирменных материалов компании: синий логотипа и
-   оранжевый с полиграфии ПОЛАТИ, плюс стальные оттенки под тему
-   промышленного строительства.
+   1. position:fixed. На телефоне он привязывает элемент к «бумажной»
+      области страницы, а не к тому, что реально видно. Когда вылезает
+      клавиатура или прячется адресная строка, видимая область меняется, а
+      закреплённые элементы остаются на старом месте — отсюда и ощущение,
+      что всё расползлось. Убрано совсем, высота задаётся через 100dvh,
+      который как раз пересчитывается вместе с видимой областью.
 
-   ШРИФТ системный, без загрузки из интернета. Это сознательный выбор:
-   кандидаты открывают страницу с телефона, часто на мобильном интернете
-   вдали от города, а веб-шрифт добавил бы и задержку, и зависимость от
-   стороннего CDN, которой у проекта больше нигде нет.
+   2. Шапка с тремя цифрами. На узком экране три колонки цифр с подписями
+      не помещались и распирали страницу по ширине. На телефоне цифры
+      убраны: там важнее разговор, а не витрина. На компьютере остались.
+
+   -webkit-text-size-adjust:100% запрещает Android самовольно увеличивать
+   шрифт в «длинных» блоках — ещё одна причина, по которой текст вылезал
+   за край.
 --------------------------------------------------------------------- */
 :root{
   --ink:#101C24;
@@ -44,9 +49,11 @@
 *{box-sizing:border-box;margin:0;padding:0}
 
 html,body{
-  height:100vh;
-  height:100dvh;
+  height:100%;
   overflow:hidden;
+  overscroll-behavior:none;
+  -webkit-text-size-adjust:100%;
+  text-size-adjust:100%;
 }
 
 body{
@@ -57,85 +64,33 @@ body{
 }
 
 #shell{
-  /* position:fixed прибивает раскладку к окну намертво.
-
-     Это не украшение, а страховка. До этого высота задавалась через
-     height:100% от body — цепочка, которую ломает что угодно: забытая
-     высота строки у сетки, неожиданно широкое сообщение, масштаб страницы
-     в браузере. Стоило цепочке порваться, и содержимое начинало распирать
-     страницу: поле ввода уезжало под панель задач, фон пересчитывался и
-     «приближался».
-
-     Фиксированный элемент вообще не участвует в расчёте высоты документа,
-     поэтому страница не может стать выше или шире экрана ни при каких
-     обстоятельствах. */
-  position:fixed;
-  inset:0;
-  height:100%;
-  max-height:100%;
+  width:100%;
+  height:100vh;
+  height:100dvh;      /* пересчитывается вместе с клавиатурой */
+  overflow:hidden;
   display:grid;
   grid-template-columns:minmax(0,42fr) minmax(0,58fr);
-  /* grid-template-rows ОБЯЗАТЕЛЕН, и это была причина сразу двух багов.
-     Без него у сетки одна неявная строка размером auto — она растёт под
-     содержимое, а height:100% на контейнере её не удерживает. Лента
-     сообщений росла с каждым новым сообщением, вместе с ней росла вся
-     сетка, поле ввода уезжало вниз под панель задач, а фотография слева
-     пересчитывала cover под новую высоту и выглядела так, будто
-     «приближается» и съезжает. minmax(0,1fr) жёстко фиксирует строку по
-     высоте экрана, и внутри неё прокручивается только лента. */
   grid-template-rows:minmax(0,1fr);
-  overflow:hidden;
 }
 
-/* Ни одна внутренняя часть не должна расширять свою колонку. */
-#pitch,#chat,#feed,#chips,/* Кнопки выбора ответа на текущий вопрос анкеты. Оформлены заметнее
-   подсказок: подсказка — это наводка «о чём можно спросить», а здесь
-   кандидат нажатием отвечает, и вариантов ровно столько, сколько
-   допустимо. */
-#options{
-  flex:none;
-  display:flex;
-  flex-wrap:wrap;
-  gap:8px;
-  padding:0 clamp(16px,2vw,26px) 12px;
-}
-#options:empty{display:none}
-#options button{
-  font:inherit;
-  font-size:14px;
-  color:#fff;
-  background:var(--blue);
-  border:0;
-  border-radius:10px;
-  padding:10px 16px;
-  cursor:pointer;
-}
-#options button:hover{background:var(--sky)}
-
-#compose{max-width:100%;min-width:0}
+#pitch,#chat{min-width:0;min-height:0;overflow:hidden}
 
 /* ======================= ЛЕВАЯ ЧАСТЬ: ПРЕДЛОЖЕНИЕ ==================== */
 
 #pitch{
   position:relative;
-  min-width:0;
   padding:clamp(24px,3vw,52px);
   display:flex;
   flex-direction:column;
   justify-content:space-between;
   gap:16px;
-  min-height:0;
   background:
     linear-gradient(180deg,rgba(16,28,36,.62) 0%,rgba(11,95,165,.72) 100%),
     url("/static/hero-alpinist.jpg") center/cover no-repeat;
   color:#fff;
-  overflow:hidden;
 }
 
-
-/* Вертикальные волоски — мотив стоек строительных лесов. Не украшение:
-   они привязаны к трём цифрам ниже и визуально держат их в одной
-   структуре, как леса держат ярусы. */
+/* Вертикальные волоски — мотив стоек строительных лесов. */
 #pitch::after{
   content:"";
   position:absolute;
@@ -149,7 +104,6 @@ body{
   background-position:22% 0,52% 0,82% 0;
   background-repeat:no-repeat;
 }
-
 #pitch > *{position:relative;z-index:1}
 
 .brand{
@@ -160,26 +114,24 @@ body{
   letter-spacing:.16em;
   font-weight:600;
 }
-.brand span{opacity:.82}
+.brand span{opacity:.9}
 .mark{
   width:26px;height:26px;flex:none;
-  border:2px solid #fff;
-  border-radius:4px;
-  position:relative;
+  border:2px solid #fff;border-radius:4px;position:relative;
 }
 .mark::before{
   content:"";position:absolute;inset:5px;
-  border-top:2px solid #fff;
-  border-bottom:2px solid #fff;
+  border-top:2px solid #fff;border-bottom:2px solid #fff;
 }
 
 h1{
-  font-size:clamp(30px,3.6vw,54px);
-  line-height:1.04;
+  font-size:clamp(28px,3.4vw,50px);
+  line-height:1.05;
   letter-spacing:-.022em;
   font-weight:700;
   max-width:12ch;
 }
+.tagline{display:none}          /* только для телефона, см. ниже */
 
 .lede{
   margin-top:16px;
@@ -199,47 +151,28 @@ h1{
 .fact b{
   display:block;
   font-size:clamp(21px,2.5vw,36px);
-  font-weight:700;
-  letter-spacing:-.02em;
-  line-height:1.05;
+  font-weight:700;letter-spacing:-.02em;line-height:1.05;
 }
 .fact span{
-  display:block;
-  margin-top:6px;
-  font-size:clamp(11px,.85vw,13px);
-  line-height:1.35;
+  display:block;margin-top:6px;
+  font-size:clamp(11px,.85vw,13px);line-height:1.35;
   color:rgba(255,255,255,.74);
 }
 
 /* ========================= ПРАВАЯ ЧАСТЬ: ЧАТ ========================= */
 
-#chat{
-  min-width:0;
-  /* min-height:0 нужен по той же причине: без него флекс-контейнер внутри
-     сетки отказывается сжиматься ниже размера своего содержимого. */
-  min-height:0;
-  display:flex;
-  flex-direction:column;
-  overflow:hidden;
-  background:var(--pale);
-}
+#chat{display:flex;flex-direction:column;background:var(--pale)}
 
 #bar{
   flex:none;
   padding:16px clamp(16px,2vw,28px);
   background:var(--paper);
   border-bottom:1px solid #DCE3E8;
-  display:flex;
-  align-items:center;
-  gap:11px;
+  display:flex;align-items:center;gap:11px;
 }
 #bar strong{font-size:15px;font-weight:600}
 #bar em{font-style:normal;font-size:13px;color:var(--muted)}
-.dot{
-  width:8px;height:8px;flex:none;
-  border-radius:50%;
-  background:#2BB673;
-}
+.dot{width:8px;height:8px;flex:none;border-radius:50%;background:#2BB673}
 
 /* Единственная прокручиваемая область на всей странице. */
 #feed{
@@ -249,114 +182,101 @@ h1{
   overflow-x:hidden;
   overscroll-behavior:contain;
   padding:clamp(16px,2vw,26px);
-  display:flex;
-  flex-direction:column;
-  gap:12px;
+  display:flex;flex-direction:column;gap:12px;
   scrollbar-width:thin;
 }
 
 .msg{
   max-width:86%;
   padding:11px 15px;
-  font-size:15px;
-  line-height:1.5;
+  font-size:15px;line-height:1.5;
   white-space:pre-wrap;
   overflow-wrap:anywhere;
 }
 .msg.bot{
-  align-self:flex-start;
-  background:var(--paper);
+  align-self:flex-start;background:var(--paper);
   border-radius:3px 14px 14px 14px;
   box-shadow:0 1px 2px rgba(16,28,36,.09);
 }
 .msg.me{
-  align-self:flex-end;
-  background:var(--blue);
-  color:#fff;
+  align-self:flex-end;background:var(--blue);color:#fff;
   border-radius:14px 3px 14px 14px;
 }
 .msg.wait{color:var(--muted);font-style:italic}
 
+/* --- Подсказки: о чём можно спросить. Одна строка, листается вбок. --- */
 #chips{
   flex:none;
-  display:flex;
-  gap:8px;
+  display:flex;gap:8px;
   padding:0 clamp(16px,2vw,26px) 12px;
   overflow-x:auto;
   scrollbar-width:none;
 }
 #chips::-webkit-scrollbar{display:none}
 #chips button{
+  flex:none;white-space:nowrap;
+  font:inherit;font-size:13.5px;
+  color:var(--blue);background:var(--paper);
+  border:1px solid #CFDAE2;border-radius:999px;
+  padding:8px 14px;cursor:pointer;
+}
+#chips button:active{background:var(--pale)}
+
+/* --- Варианты ответа на вопрос анкеты -------------------------------
+   Обведены тёмной рамкой и подписаны намеренно. На телефоне кандидат не
+   понимал, что от него хотят: кнопки сливались с фоном и выглядели как
+   украшение. Рамка с подписью показывает, что это и есть ответ. --- */
+#options-wrap{
   flex:none;
-  font:inherit;
-  font-size:13.5px;
-  color:var(--blue);
+  margin:0 clamp(16px,2vw,26px) 12px;
+  padding:10px 12px 12px;
   background:var(--paper);
-  border:1px solid #CFDAE2;
-  border-radius:999px;
-  padding:7px 14px;
-  cursor:pointer;
+  border:2px solid var(--ink);
+  border-radius:14px;
 }
-#chips button:hover{border-color:var(--sky);color:var(--sky)}
-
-/* Кнопки выбора ответа на текущий вопрос анкеты. Оформлены заметнее
-   подсказок: подсказка — это наводка «о чём можно спросить», а здесь
-   кандидат нажатием отвечает, и вариантов ровно столько, сколько
-   допустимо. */
-#options{
-  flex:none;
-  display:flex;
-  flex-wrap:wrap;
-  gap:8px;
-  padding:0 clamp(16px,2vw,26px) 12px;
+#options-wrap[hidden]{display:none}
+#options-title{
+  font-size:12.5px;
+  color:var(--muted);
+  margin-bottom:9px;
 }
-#options:empty{display:none}
+#options{display:flex;flex-wrap:wrap;gap:8px}
 #options button{
-  font:inherit;
-  font-size:14px;
-  color:#fff;
-  background:var(--blue);
-  border:0;
-  border-radius:10px;
-  padding:10px 16px;
-  cursor:pointer;
+  font:inherit;font-size:14px;
+  color:#fff;background:var(--blue);
+  border:0;border-radius:10px;
+  padding:11px 16px;cursor:pointer;
 }
-#options button:hover{background:var(--sky)}
+#options button:active{background:var(--sky)}
 
+/* --- Строка ввода --------------------------------------------------- */
 #compose{
   flex:none;
-  display:flex;
-  gap:10px;
-  padding:14px clamp(16px,2vw,26px);
-  /* Запас снизу. Панель задач Windows и панель жестов на телефонах
-     перекрывают нижние пиксели окна браузера, и поле ввода оказывалось
-     наполовину под ними. 22px + safe-area держат его выше края. */
-  padding-bottom:calc(28px + env(safe-area-inset-bottom));
+  display:flex;gap:10px;
+  padding:12px clamp(16px,2vw,26px);
+  padding-bottom:calc(18px + env(safe-area-inset-bottom));
   background:var(--paper);
   border-top:1px solid #DCE3E8;
 }
 #text{
-  flex:1 1 auto;
-  min-width:0;
+  flex:1 1 auto;min-width:0;
   font:inherit;
-  font-size:16px; /* 16px не даёт iOS увеличивать страницу при фокусе */
-  padding:12px 14px;
-  border:1px solid #CFDAE2;
-  border-radius:10px;
-  background:var(--pale);
+  font-size:16px;              /* меньше 16px — iOS увеличивает страницу */
+  padding:13px 14px;
+  /* Тёмный контур: чтобы сразу было видно, куда писать. Светлая рамка
+     терялась на светлом фоне, и поле не читалось как поле. */
+  border:2px solid var(--ink);
+  border-radius:11px;
+  background:var(--paper);
   color:var(--ink);
 }
 #text::placeholder{color:#8C9DA9}
+#text:focus{outline:none;border-color:var(--blue)}
 #send{
-  flex:none;
-  width:48px;
-  border:0;
-  border-radius:10px;
-  background:var(--safety);
-  color:#fff;
-  font-size:19px;
-  line-height:1;
-  cursor:pointer;
+  flex:none;width:52px;
+  border:0;border-radius:11px;
+  background:var(--safety);color:#fff;
+  font-size:19px;line-height:1;cursor:pointer;
 }
 #send:disabled{background:#C3CED6;cursor:default}
 
@@ -364,35 +284,69 @@ h1{
 #pitch :focus-visible{outline-color:#fff}
 
 /* ============================ ТЕЛЕФОН =============================== */
-/* Чат занимает почти весь экран, предложение сжимается в шапку: на
-   маленьком экране разговор важнее презентации. */
 @media (max-width:900px){
-  #shell{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}
-  #pitch{min-height:0}
+  #shell{
+    grid-template-columns:1fr;
+    /* Шапка ровно 74px. Не auto: раньше её высоту задавало содержимое, на
+       узком экране появлялись переносы, шапка росла и съедала переписку. */
+    grid-template-rows:74px minmax(0,1fr);
+  }
+
   #pitch{
-    padding:14px 16px;
-    gap:10px;
-    /* Размер фона задан в процентах ШИРИНЫ (cover по высоте не считается),
-       поэтому появление и скрытие адресной строки браузера не заставляет
-       картинку пересчитываться и дёргаться при прокрутке ленты. */
+    padding:0 14px;
+    gap:0;
+    flex-direction:row;
+    align-items:center;
+    justify-content:flex-start;
     background:
-      linear-gradient(180deg,rgba(16,28,36,.66) 0%,rgba(11,95,165,.78) 100%),
-      url("/static/hero-alpinist.jpg") center 28%/100% auto no-repeat;
+      linear-gradient(90deg,rgba(16,28,36,.72) 0%,rgba(11,95,165,.72) 100%),
+      url("/static/hero-alpinist.jpg") center 30%/cover no-repeat;
   }
   #pitch::after{display:none}
-  h1{font-size:22px;max-width:none;margin-top:8px}
-  .lede{display:none}
-  .facts{margin-top:10px;padding-top:10px;gap:10px}
-  .fact b{font-size:17px}
-  .fact span{font-size:10.5px;margin-top:3px}
+
+  .brand{font-size:12px;letter-spacing:.12em;gap:8px;flex:none}
+  .mark{width:20px;height:20px;border-width:1.5px}
+  .mark::before{inset:3.5px;border-top-width:1.5px;border-bottom-width:1.5px}
+
+  /* Крупный заголовок и цифры на телефоне не показываются: они не влезают
+     по ширине и обрезаются на полуслове. Вместо них одна короткая строка. */
+  h1,.lede,.facts{display:none}
+  .tagline{
+    display:block;
+    margin-left:12px;
+    padding-left:12px;
+    border-left:1px solid var(--line);
+    font-size:12.5px;
+    line-height:1.25;
+    color:rgba(255,255,255,.92);
+    /* Максимум две строки, дальше многоточие — шапка не поедет. */
+    display:-webkit-box;
+    -webkit-line-clamp:2;
+    -webkit-box-orient:vertical;
+    overflow:hidden;
+  }
+
   #bar{display:none}
-  .msg{max-width:92%}
+
+  #feed{padding:14px 12px;gap:10px}
+  .msg{max-width:88%;font-size:14.5px;padding:10px 13px}
+
+  #chips{padding:0 12px 10px}
+  #chips button{font-size:13px;padding:8px 13px}
+
+  #options-wrap{margin:0 12px 10px;padding:9px 10px 11px}
+  #options-title{font-size:12px;margin-bottom:8px}
+  #options button{font-size:13.5px;padding:11px 14px}
+
+  #compose{
+    padding:10px 12px;
+    padding-bottom:calc(12px + env(safe-area-inset-bottom));
+    gap:8px;
+  }
+  #send{width:48px}
 }
 
-/* Невысокое окно или увеличенный масштаб страницы: текст предложения
-   уменьшается и частично убирается, чтобы содержимое гарантированно
-   помещалось. Иначе оно распирало панель и страница выглядела «съехавшей»,
-   хотя прокрутки при overflow:hidden всё равно нет. */
+/* Невысокое окно на компьютере: предложение слева сжимается. */
 @media (min-width:901px) and (max-height:820px){
   h1{font-size:clamp(26px,2.8vw,38px)}
   .lede{margin-top:12px;font-size:15px}
@@ -403,10 +357,6 @@ h1{
   #pitch{padding:22px}
 }
 @media (min-width:901px) and (max-height:520px){
-  .facts{display:none}
-}
-@media (max-width:900px) and (max-height:620px){
-  h1{font-size:18px}
   .facts{display:none}
 }
 
@@ -421,6 +371,7 @@ h1{
 
   <section id="pitch">
     <div class="brand"><i class="mark"></i><span>ПОЛАТИ</span></div>
+    <p class="tagline">Вахта на промышленных объектах по всей России</p>
 
     <div>
       <h1>Работа на высоте вахтой по России</h1>
@@ -454,7 +405,10 @@ h1{
       <button type="button">Хочу оставить заявку</button>
     </div>
 
-    <div id="options"></div>
+    <div id="options-wrap" hidden>
+      <div id="options-title">Выберите ответ или напишите свой</div>
+      <div id="options"></div>
+    </div>
 
     <form id="compose" autocomplete="off">
       <input id="text" type="text" maxlength="2000" placeholder="Напишите вопрос о работе" aria-label="Ваш вопрос">
@@ -465,20 +419,25 @@ h1{
 </div>
 
 <script>
+console.log("ПОЛАТИ · вёрстка layout-v6");
+
 const API_URL = "/chat";
 
-const feed  = document.getElementById("feed");
-const form  = document.getElementById("compose");
-const text  = document.getElementById("text");
-const send  = document.getElementById("send");
-const chips = document.getElementById("chips");
-const optionsBox = document.getElementById("options");
+const feed        = document.getElementById("feed");
+const form        = document.getElementById("compose");
+const text        = document.getElementById("text");
+const send        = document.getElementById("send");
+const chips       = document.getElementById("chips");
+const optionsWrap = document.getElementById("options-wrap");
+const optionsBox  = document.getElementById("options");
 
 function addMessage(body, who){
   const el = document.createElement("div");
   el.className = "msg " + who;
   el.textContent = body;
   feed.appendChild(el);
+  // Прокрутка к последнему сообщению. Без неё после отправки человек видел
+  // старую часть переписки и не понимал, ушло его сообщение или нет.
   feed.scrollTop = feed.scrollHeight;
   return el;
 }
@@ -490,22 +449,25 @@ addMessage(
 );
 
 // Кнопки с вариантами ответа на текущий вопрос анкеты. Сервер присылает их
-// в поле options — если список пуст, кнопки убираются и остаётся обычный
-// ввод. Строка ввода при этом не блокируется: кандидат вправе ответить
-// своими словами, кнопки лишь избавляют от набора текста на телефоне.
+// в поле options; пустой список убирает блок и оставляет обычный ввод.
+// Поле ввода при этом не блокируется — ответить своими словами можно всегда.
 function showOptions(list){
   optionsBox.innerHTML = "";
-  if (!Array.isArray(list) || list.length === 0) return;
+  if (!Array.isArray(list) || list.length === 0){
+    optionsWrap.hidden = true;
+    return;
+  }
   list.forEach(function(label){
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = label;
     button.addEventListener("click", function(){
-      optionsBox.innerHTML = "";
+      optionsWrap.hidden = true;
       ask(label);
     });
     optionsBox.appendChild(button);
   });
+  optionsWrap.hidden = false;
 }
 
 let busy = false;
@@ -517,35 +479,28 @@ async function ask(question){
 
   addMessage(question, "me");
   text.value = "";
-  optionsBox.innerHTML = "";
+  optionsWrap.hidden = true;
   const waiting = addMessage("Печатает…", "bot wait");
 
   try {
-    // session_id не хранится и не читается в JS. Им управляет сервер через
-    // HttpOnly-cookie (backend/app.py), которую JavaScript не может ни
-    // прочитать, ни подделать. credentials:"include" обязателен: без него
-    // браузер не приложит cookie к запросу, даже если она уже выдана.
+    // session_id не хранится и не читается в JS: им управляет сервер через
+    // HttpOnly-cookie. credentials:"include" обязателен, иначе браузер не
+    // приложит cookie к запросу и диалог не будет помниться.
     const response = await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
       body: JSON.stringify({ message: question })
     });
-    // Проверка response.ok обязательна. fetch считает успехом ЛЮБОЙ ответ
-    // сервера, включая 500 и 422 — без этой проверки код шёл дальше,
-    // data.answer оказывался undefined, и кандидат видел в чате буквальное
-    // слово "undefined", то есть явно сломанного бота.
-    if (!response.ok) {
-      throw new Error("HTTP " + response.status);
-    }
+    // fetch считает успехом любой ответ сервера, включая 500. Без этой
+    // проверки в чате появлялось слово "undefined".
+    if (!response.ok) throw new Error("HTTP " + response.status);
+
     const data = await response.json();
     waiting.remove();
     addMessage(data.answer || "Пустой ответ сервера. Попробуйте ещё раз.", "bot");
     showOptions(data.options);
   } catch (err) {
-    // Кандидату не показываем технических подробностей: для него разницы
-    // между упавшей сетью и непонятым вопросом нет, а текст ошибки только
-    // напугал бы. Формулировка нейтральная и подсказывает, что делать.
     waiting.remove();
     addMessage(
       "Не получилось отправить сообщение. Проверьте связь и напишите ещё раз.",
@@ -554,7 +509,6 @@ async function ask(question){
   } finally {
     busy = false;
     send.disabled = false;
-    text.focus();
   }
 }
 
@@ -572,7 +526,10 @@ chips.addEventListener("click", function(e){
   chips.remove();
 });
 
-text.focus();
+// Фокус в поле ввода ставится только на компьютере. На телефоне это
+// немедленно выбрасывало клавиатуру поверх страницы ещё до того, как
+// человек успевал прочитать приветствие.
+if (window.matchMedia("(min-width:901px)").matches) text.focus();
 </script>
 </body>
 </html>

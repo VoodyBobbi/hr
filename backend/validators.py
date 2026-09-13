@@ -146,6 +146,31 @@ def _validate_optional_digits(value: str, field_name: str, length: int, label: s
     return v
 
 
+# Односложные утвердительные ответы, после которых обязательно нужны
+# подробности.
+_BARE_YES = {
+    "да", "есть", "имеется", "был", "была", "были", "ага", "угу", "+",
+    "да есть", "есть да", "конечно", "имею",
+}
+
+
+def _validate_detailed_answer(value: str, field_name: str, hint: str) -> str:
+    """Поля, где «да» без подробностей — бесполезный ответ.
+
+    Судимость, административный надзор, ограничения по здоровью,
+    образование. Кандидат отвечал «Есть», бот считал поле заполненным и шёл
+    дальше, а в карточке у HR оставалось одно слово: ни статьи, ни срока, ни
+    диагноза. Менеджеру всё равно приходилось звонить и переспрашивать —
+    то есть анкета своей работы не делала.
+
+    Отрицание («нет») принимается как есть: там уточнять нечего."""
+    v = _require_nonempty(value, field_name, 500)
+    normalized = v.strip().lower().strip(" .!,")
+    if normalized in _BARE_YES:
+        raise FieldValidationError(field_name, hint)
+    return v
+
+
 def _validate_dept_code(value: str, field_name: str) -> str:
     v = _require_nonempty(value, field_name, 16)
     digits = re.sub(r"\D", "", v)
@@ -199,6 +224,18 @@ _VALIDATORS = {
     "Код подразделения выдачи паспорта": _validate_dept_code,
     "СНИЛС": lambda v, f: _validate_digits(v, f, 11, "СНИЛС"),
     "ИНН": lambda v, f: _validate_optional_digits(v, f, 12, "ИНН"),
+    "Судимость": lambda v, f: _validate_detailed_answer(
+        v, f, "Нужны подробности: статья и когда закончился срок. "
+              "Если судимости нет — напишите «нет»."),
+    "Административный надзор": lambda v, f: _validate_detailed_answer(
+        v, f, "Уточните, какие именно ограничения. "
+              "Если надзора нет — напишите «нет»."),
+    "Ограничения по здоровью": lambda v, f: _validate_detailed_answer(
+        v, f, "Перечислите, какие именно ограничения. "
+              "Если их нет — напишите «нет»."),
+    "Образование/удостоверения/напиши что есть": lambda v, f: _validate_detailed_answer(
+        v, f, "Напишите, какое образование и какие удостоверения. "
+              "Если удостоверений нет — так и напишите."),
     "Рост": lambda v, f: _validate_number_range(v, f, 100, 230, "рост (см)"),
     "Вес": lambda v, f: _validate_number_range(v, f, 30, 250, "вес (кг)"),
     "Размер одежды": _validate_clothing_size,

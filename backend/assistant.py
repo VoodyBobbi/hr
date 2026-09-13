@@ -156,6 +156,39 @@ def _get_mtimes() -> dict:
     }
 
 
+# Слова, по которым видно, что кандидат ДЕЙСТВИТЕЛЬНО согласился начать
+# анкету. Проверяются перед тем, как принять маркер START_ANKETA от модели.
+_ANKETA_INTENT = (
+    "да", "давай", "давайте", "хочу", "готов", "готова", "согласен", "согласна",
+    "начнём", "начнем", "поехали", "оформля", "заполн", "анкет", "заявк",
+    "откликну", "устроит", "работать", "ок", "окей", "буду",
+)
+
+
+def _user_really_asked_for_anketa(user_message: str) -> bool:
+    """Правда ли кандидат просил начать анкету.
+
+    Нужна потому, что GigaChat ставит маркер START_ANKETA слишком охотно.
+    В боевом тесте кандидат спросил «Какие есть варианты?» — обычный вопрос
+    о профессиях — а модель прислала маркер, и человеку вместо ответа
+    показали согласие на обработку персональных данных. Выглядело так,
+    будто бот силой тащит заполнять анкету, хотя его просто спросили.
+
+    Инструкция в промпте это запрещает, но полагаться только на инструкцию
+    нельзя: модель ошибается, а цена ошибки здесь высокая — кандидат уходит.
+    Поэтому маркер принимается, только если в сообщении кандидата есть хоть
+    какой-то знак согласия.
+
+    Вопросительный знак отменяет согласие: «хочу узнать, какие есть
+    варианты?» — это вопрос, а не просьба оформляться."""
+    text = user_message.strip().lower()
+    if not text:
+        return False
+    if text.endswith("?"):
+        return False
+    return any(re.search(rf"\b{re.escape(w)}", text) for w in _ANKETA_INTENT)
+
+
 def _format_kb_context(kb_chunks: list | None) -> str:
     """Найденные факты в текст для промпта, с ограничением объёма.
 
@@ -888,10 +921,21 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
         # продолжения — сразу же, в этом же ходу, показываем текст согласия
         # 152-ФЗ (см. _handle_anketa_turn, anketa_start_requested=True),
         # объединяя его с ответом GigaChat в одно сообщение кандидату.
-        consent_text = _handle_anketa_turn(
-            source, external_id, user_message, last_bot_message,
-            anketa_start_requested=True,
-        )
+        if not _user_really_asked_for_anketa(user_message):
+            # Модель поставила маркер там, где кандидат ни о чём таком не
+            # просил. Игнорируем: пусть ответ останется обычным ответом на
+            # вопрос. В лог пишем, чтобы такие случаи было видно и можно
+            # было поправить формулировку в system_prompt.md.
+            print(
+                f"[assistant] START_ANKETA проигнорирован: в сообщении "
+                f"кандидата нет согласия ({user_message[:60]!r})."
+            )
+            consent_text = None
+        else:
+            consent_text = _handle_anketa_turn(
+                source, external_id, user_message, last_bot_message,
+                anketa_start_requested=True,
+            )
         if consent_text:
             clean_answer = f"{clean_answer}\n\n{consent_text}" if clean_answer else consent_text
 

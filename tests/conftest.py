@@ -87,7 +87,7 @@ def bot():
         "FieldValidationError": FieldValidationError, "re": re,
     }
     chunk = source_code[source_code.index("def _handle_anketa_turn("):
-                        source_code.index("def _format_candidate_progress(")]
+                        source_code.index("# Служебная подсказка о заполненных полях")]
     exec(compile(chunk, "assistant_part", "exec"), namespace)
     guard = source_code[source_code.index("_ANKETA_INTENT = ("):
                         source_code.index("def _format_kb_context(")]

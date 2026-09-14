@@ -2,7 +2,8 @@ import asyncio
 import os
 
 from dotenv import load_dotenv
-from telegram import ReplyKeyboardMarkup, Update
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from telegram.error import TelegramError
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -14,6 +15,7 @@ from telegram.ext import (
 
 from .assistant import get_answer
 from . import anketa
+from . import logger
 from . import candidates
 from . import notifications
 from . import rate_limiting
@@ -74,7 +76,41 @@ def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list:
     return parts
 
 
-async def reply_long(update: Update, text: str, options: list | None = None) -> None:
+async def _send_with_retry(update: Update, text: str, reply_markup=None,
+                           attempts: int = 3) -> bool:
+    """Отправляет сообщение, повторяя попытку при сбое связи.
+
+    Зачем повтор. Одна неудачная отправка ломает анкету сильнее, чем
+    кажется: поле уже ждёт ответа, а вопрос до человека не дошёл. Он видит
+    тишину, пишет что-нибудь вроде «Ало» — и это уходит в поле, которого он
+    не видел. Так в карточку попали город «Ало» и адрес «Опполп»: данные
+    испорчены молча, и никто не заметил.
+
+    Три попытки с нарастающей паузой. Возвращает True, если сообщение
+    ушло, — вызывающий код по этому значению понимает, дошёл ли вопрос."""
+    for attempt in range(1, attempts + 1):
+        try:
+            await update.message.reply_text(text, reply_markup=reply_markup)
+            return True
+        except TelegramError as e:
+            if attempt == attempts:
+                print(
+                    f"[telegram] Сообщение не доставлено после {attempts} попыток: {e}. "
+                    f"Кандидат chat_id={update.effective_chat.id} не увидел ответ."
+                )
+                logger.log_event(
+                    logger.EVENT_GIGACHAT,
+                    f"Сообщение кандидату не доставлено после {attempts} попыток: {e}"[:300],
+                    status=logger.STATUS_ERROR,
+                    source="telegram", external_id=str(update.effective_chat.id),
+                )
+                return False
+            await asyncio.sleep(attempt * 1.5)
+    return False
+
+
+async def reply_long(update: Update, text: str, options: list | None = None,
+                     in_anketa: bool = False) -> None:
     """reply_text с учётом лимита длины: отправляет ответ одним или
     несколькими сообщениями подряд.
 
@@ -91,7 +127,7 @@ async def reply_long(update: Update, text: str, options: list | None = None) -> 
     свободный ввод."""
     parts = split_message(text)
     for part in parts[:-1]:
-        await update.message.reply_text(part)
+        await _send_with_retry(update, part)
 
     if options:
         # Идёт анкета: под полем ввода варианты ответа на текущий вопрос.
@@ -102,11 +138,17 @@ async def reply_long(update: Update, text: str, options: list | None = None) -> 
             one_time_keyboard=True,
             resize_keyboard=True,
         )
+    elif in_anketa:
+        # Идёт анкета, но у текущего поля нет готовых вариантов — нужен
+        # свободный ввод. Кнопку «Заполнить анкету» здесь показывать нельзя:
+        # её нажатие уходило бы в поле как ответ. На скриншоте текст кнопки
+        # попал в дату рождения, и человек застрял на «не понял дату».
+        markup = ReplyKeyboardRemove()
     else:
         # Обычный разговор: постоянная кнопка «Заполнить анкету».
         markup = MAIN_KEYBOARD
 
-    await update.message.reply_text(parts[-1], reply_markup=markup)
+    await _send_with_retry(update, parts[-1], reply_markup=markup)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -178,8 +220,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # видит в этом же сообщении.
     candidate_id = await asyncio.to_thread(candidates.find_candidate, "telegram", chat_id)
     options = await asyncio.to_thread(anketa.pending_field_options, candidate_id)
+    in_anketa_now = await asyncio.to_thread(rate_limiting.in_anketa, "telegram", chat_id)
 
-    await reply_long(update, answer, options)
+    await reply_long(update, answer, options, in_anketa=in_anketa_now)
 
 
 async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -235,7 +278,20 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    # Увеличенные таймауты. По умолчанию python-telegram-bot ждёт ответа
+    # Telegram около 5 секунд, и на нестабильной связи отправка падает с
+    # TimedOut. Последствие хуже, чем кажется: вопрос анкеты до человека не
+    # доходит, а следующая его реплика попадает в поле, которого он не
+    # видел. Именно так в карточку попали город «Ало» и адрес «Опполп».
+    application = (
+        ApplicationBuilder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .connect_timeout(20.0)
+        .read_timeout(20.0)
+        .write_timeout(20.0)
+        .pool_timeout(20.0)
+        .build()
+    )
 
     # filters.ChatType.PRIVATE — только личные сообщения кандидатов.
     #

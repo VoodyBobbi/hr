@@ -596,15 +596,21 @@ def _handle_anketa_turn(source: str, external_id: str,
         candidates.set_stage(candidate_id, anketa.STAGE_DELETE)
         return anketa.DELETE_CONFIRMATION_PROMPT
 
-    # --- Анкета уже принята: дальше обычный диалог ---
+    # --- Анкета уже принята ---
     if stage == anketa.STAGE_DONE or _card_already_confirmed(candidate_id):
-        # Кроме случая, когда человек ПРЯМО СЕЙЧАС попросил начать заново.
+        # «Я заполнил?», «что осталось» — отвечает КОД, а не нейросеть.
+        if anketa.is_anketa_status_question(user_message):
+            return anketa.format_status(candidate_id, anketa.STAGE_DONE)
+
+        # Заново — ТОЛЬКО по явной просьбе человека: кнопка или прямая
+        # фраза. Метку от нейросети здесь НЕ слушаем намеренно.
         #
-        # Раньше здесь был безусловный выход, и получалась ловушка: бот сам
-        # предлагал «напишите "хочу оставить заявку"», человек писал — и
-        # снова упирался в эту строку. Ответа не было вообще, на экране
-        # висело «Пустой ответ сервера». Выбраться было невозможно.
-        if anketa_start_requested or anketa.is_anketa_request(user_message):
+        # Раньше слушали, и выходил круг: человек спрашивал «я заполнил?»,
+        # модель выдумывала «осталось заполнить здоровье», человек отвечал
+        # «да», модель ставила метку, и код показывал согласие 152-ФЗ
+        # заново — хотя анкета давно сдана. Дальше человек писал что-то со
+        # словом «нет», и это читалось как отказ от согласия.
+        if anketa.is_anketa_request(user_message):
             candidates.set_stage(candidate_id, anketa.STAGE_LAW)
             return anketa.LAW_CONSENT_TEXT
         return None
@@ -654,6 +660,12 @@ def _handle_anketa_turn(source: str, external_id: str,
     if anketa.is_progress_question(user_message):
         return anketa.format_progress_answer(candidate_id)
 
+    # Нажали кнопку «Заполнить анкету», уже находясь в анкете. Раньше текст
+    # кнопки уходил в поле как ответ: на скриншоте он попал в дату рождения,
+    # человек получил «не понял дату» и застрял.
+    if anketa.is_anketa_request(user_message):
+        return anketa.format_status(candidate_id, anketa.STAGE_FIELDS)
+
     next_step = anketa.get_next_step(candidate_id)
     if next_step:
         field, _ = next_step
@@ -661,6 +673,12 @@ def _handle_anketa_turn(source: str, external_id: str,
         if ok and message is None:
             candidates.set_stage(candidate_id, anketa.STAGE_CONFIRM)
             return anketa.format_card_for_confirmation(candidate_id)
+
+        # Ответ не подошёл. Проверяем ПОСЛЕ неудачной проверки, а не до:
+        # иначе валидный ответ вроде «Последнее место работы: заполнял
+        # анкеты» был бы съеден как вопрос и потерян.
+        if not ok and anketa.is_anketa_status_question(user_message):
+            return anketa.format_status(candidate_id, anketa.STAGE_FIELDS)
         return message
 
     candidates.set_stage(candidate_id, anketa.STAGE_CONFIRM)
@@ -698,21 +716,22 @@ def _card_already_confirmed(candidate_id: str) -> bool:
     return bool(card.get("Факт ознакомления с готовой карточкой", "").strip())
 
 
-def _format_candidate_progress(card: dict) -> str:
-    filled = {
-        k: v for k, v in card.items()
-        if v and k not in ("ID кандидата", "Источник", "ДАТА заполнения")
-    }
-    if not filled:
-        return "Анкета этого кандидата ещё не начата."
-
-    count = len(filled)
-    return (
-        f"Кандидат уже сообщил {count} пункт(ов) анкеты (используй это только для себя, "
-        f"чтобы не спрашивать повторно; отвечай пользователю простыми словами, БЕЗ технических "
-        f"названий полей и без выгрузки полного списка, если он явно не попросил это): "
-        + ", ".join(filled.keys())
-    )
+# Служебная подсказка о заполненных полях БОЛЬШЕ НЕ ПЕРЕДАЁТСЯ модели.
+#
+# Раньше в каждый запрос уходила строка «кандидат сообщил 27 пункт(ов)
+# анкеты» со списком полей и просьбой не упоминать их вслух. Модель
+# упоминала — и при этом врала: видела 27 из 29 и сочиняла «осталось
+# добавить информацию о здоровье», хотя всё было заполнено. Человек верил
+# и лез доделывать несуществующее, а дальше диалог уходил в круг.
+#
+# Принцип, к которому пришли: НЕЙРОСЕТЬ НИЧЕГО НЕ ЗНАЕТ ПРО АНКЕТУ И
+# НИКОГДА ПРО НЕЁ НЕ ГОВОРИТ. Всё, что касается формы — статус, что
+# осталось, заполнена или нет, начать заново — отвечает код
+# (anketa.format_status). Врать становится нечем.
+#
+# Побочный выигрыш: подсказка уходила в КАЖДЫЙ запрос и стоила токенов,
+# а вопросы про анкету — самые частые после сдачи — теперь до модели
+# вообще не доходят.
 
 
 # Отдельная блокировка на КАЖДЫЙ диалог. _history_lock защищает только сами
@@ -837,10 +856,6 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
         logger.log_interaction(source, external_id, user_message, anketa_reply, response_time_ms, "ok")
         return anketa_reply, []
 
-    # candidate_id может быть None — карточки ещё нет (кандидат просто задаёт
-    # вопросы и до анкеты не дошёл). Это нормальный, самый частый случай.
-    card = candidates.get_card(candidate_id) if candidate_id else {}
-    progress_note = _format_candidate_progress(card)
 
     with _state_lock:
         current_index = _state["index"]
@@ -917,7 +932,6 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
         Messages(
             role=MessagesRole.USER,
             content=(
-                f"[Служебная информация, не для показа пользователю] {progress_note}\n\n"
                 f"Вопрос пользователя: {user_message}"
             ),
         )

@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import io
 import json
 import os
@@ -20,19 +21,41 @@ SESSIONS_PATH = os.path.join(CANDIDATS_DIR, "candidate_sessions.json")
 # asyncio.to_thread). Между ПРОЦЕССАМИ он бесполезен, а сайт и бот — это два
 # отдельных процесса ОС (см. run_all.py), поэтому дополнительно берётся
 # блокировка средствами ОС: cross_process_lock из backend/filelock.py.
-# Версия набора полей анкеты. Поднимается при ЛЮБОМ изменении состава
-# полей в anketa.ANKETA_STEPS: добавили поле, убрали, переименовали.
+# Версия набора полей анкеты. Считается АВТОМАТИЧЕСКИ — как короткий
+# отпечаток от списка полей.
 #
-# Зачем. Карточка, начатая на прежнем наборе полей, после обновления
-# оказывается несовместимой с новым: программа ждёт ответы на поля, о
-# которых кандидат никогда не спрашивали, или наоборот. Раньше это
-# проявлялось молча и странно — анкета сбивалась на середине, и понять
-# причину со стороны было невозможно (так было при добавлении поля «Этап
-# диалога»).
+# Раньше значение стояло вручную, и его надо было не забыть поднять при
+# любой правке состава полей. Забыть — легко, а последствие тихое и
+# неприятное: карточка со старым набором полей продолжает заполняться
+# новым сценарием, вопросы и сохранённые ответы разъезжаются, и понять
+# причину со стороны невозможно.
 #
-# Теперь версия записывается в карточку, а несовпадение видно явно:
-# is_outdated ниже даёт коду возможность обработать такой случай осознанно.
-ANKETA_VERSION = "2"
+# Теперь забыть нельзя в принципе: поменяли поле — отпечаток изменился
+# сам, все прежние карточки разом стали устаревшими, и кандидату честно
+# предложат начать заново.
+#
+# Берутся первые 8 символов sha256 — этого с запасом хватает, чтобы
+# случайное совпадение двух разных наборов полей было невозможным на
+# практике. Читаемость тут не нужна: значение сравнивается программой, а
+# не человеком.
+def _compute_anketa_version() -> str:
+    from .anketa import ANKETA_STEPS
+    joined = "|".join(step[0] for step in ANKETA_STEPS)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:8]
+
+
+_anketa_version_cache = None
+
+
+def anketa_version() -> str:
+    """Отпечаток текущего набора полей. Считается один раз за запуск.
+
+    Импорт anketa отложен внутрь функции: anketa сам импортирует
+    candidates, и на уровне модуля это дало бы круговой импорт."""
+    global _anketa_version_cache
+    if _anketa_version_cache is None:
+        _anketa_version_cache = _compute_anketa_version()
+    return _anketa_version_cache
 
 _lock = threading.Lock()
 
@@ -232,7 +255,7 @@ def get_or_create_candidate(source: str, external_id: str) -> str:
         candidates[new_id] = {field: "" for field in fields}
         candidates[new_id]["ID кандидата"] = new_id
         candidates[new_id]["Источник"] = source
-        candidates[new_id]["Версия анкеты"] = ANKETA_VERSION
+        candidates[new_id]["Версия анкеты"] = anketa_version()
         candidates[new_id]["ДАТА заполнения"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         _save_table(fields, candidates)
@@ -410,4 +433,4 @@ def is_outdated(candidate_id: str) -> bool:
     if not candidate_id:
         return False
     saved = str(get_card(candidate_id).get("Версия анкеты", "")).strip()
-    return saved != ANKETA_VERSION
+    return saved != anketa_version()

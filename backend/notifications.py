@@ -27,6 +27,8 @@ import os
 
 import httpx
 
+from . import logger
+
 _API_URL_TEMPLATE = "https://api.telegram.org/bot{token}/sendMessage"
 
 
@@ -71,12 +73,16 @@ def send_hr_notification(text: str, buttons: list | None = None) -> None:
             missing.append("TELEGRAM_BOT_TOKEN")
         if not chat_id:
             missing.append("TELEGRAM_HR_GROUP_CHAT_ID")
+        message = (
+            f"Уведомление HR НЕ отправлено: в .env не заполнено "
+            f"{' и '.join(missing)}."
+        )
         print(
-            f"[notifications] Уведомление HR НЕ отправлено: в .env не заполнено "
-            f"{' и '.join(missing)}. Анкета кандидата при этом сохранена — "
+            f"[notifications] {message} Анкета кандидата при этом сохранена — "
             f"её видно командой `python -m scripts.export_candidates`. "
             f"Проверить настройку Telegram: `python -m scripts.check_telegram`."
         )
+        logger.log_event(logger.EVENT_NOTIFY, message, status=logger.STATUS_ERROR)
         return
 
     url = _API_URL_TEMPLATE.format(token=token)
@@ -101,8 +107,23 @@ def send_hr_notification(text: str, buttons: list | None = None) -> None:
                 f"Частая причина: TELEGRAM_HR_GROUP_CHAT_ID в .env неверный, "
                 f"либо бот не добавлен в группу — см. README."
             )
+            logger.log_event(
+                logger.EVENT_NOTIFY,
+                f"Telegram отклонил уведомление HR ({response.status_code}): "
+                f"{response.text}"[:400],
+                status=logger.STATUS_ERROR,
+            )
+        else:
+            # Успех тоже пишем. Иначе по журналу нельзя отличить «уведомление
+            # дошло» от «код до отправки вообще не добрался».
+            logger.log_event(logger.EVENT_NOTIFY, "Уведомление HR отправлено.")
     except httpx.HTTPError as e:
         print(f"[notifications] Не удалось отправить уведомление HR-группе: {e}")
+        logger.log_event(
+            logger.EVENT_NOTIFY,
+            f"Сеть недоступна при отправке уведомления HR: {e}"[:400],
+            status=logger.STATUS_ERROR,
+        )
 
 
 def _esc(value) -> str:

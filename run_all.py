@@ -149,6 +149,16 @@ def main():
 
     print()
     print(f"Запущено: {channels}.")
+
+    # Отметка о запуске в общем журнале. По ней в панели мониторинга видно,
+    # что сервис перезапускался, и можно отличить «бот молчал» от «бота не
+    # было». Импорт здесь, а не наверху: backend тянет тяжёлые зависимости,
+    # а run_all должен оставаться запускаемым до их установки.
+    try:
+        from backend import logger
+        logger.log_event(logger.EVENT_START, f"Проект запущен: {channels}.")
+    except Exception as e:
+        print(f"[run_all] Не удалось записать событие запуска: {e}")
     print("Остановить — Ctrl+C.")
     print_encryption_key_notice()
 

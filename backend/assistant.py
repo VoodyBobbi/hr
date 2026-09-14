@@ -137,8 +137,15 @@ def get_embedding_model():
         with _embedding_model_lock:
             if _embedding_model is None:
                 print("[assistant] Загружаю модель поиска, это разовая операция...")
+                started = time.time()
                 _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-                print("[assistant] Модель поиска готова.")
+                elapsed_ms = int((time.time() - started) * 1000)
+                print(f"[assistant] Модель поиска готова за {elapsed_ms / 1000:.1f} с.")
+                logger.log_event(
+                    logger.EVENT_MODEL,
+                    f"Модель поиска загружена ({EMBEDDING_MODEL_NAME}).",
+                    duration_ms=elapsed_ms,
+                )
     return _embedding_model
 
 _state_lock = threading.RLock()
@@ -967,6 +974,17 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
             error_kind = "gigachat_unknown"
             print(f"[assistant] GigaChat: непредвиденная ошибка соединения. {e}")
 
+        # В журнал — отдельной записью. Обычная строка диалога ниже покажет,
+        # что кандидат получил ответ, но не скажет, что нейросеть при этом
+        # упала: ответ-то он получит, просто запасной. Без этой записи сбои
+        # GigaChat на сервере были бы не видны вообще.
+        logger.log_event(
+            logger.EVENT_GIGACHAT,
+            f"Сбой обращения к GigaChat ({error_kind}): {type(e).__name__}. {e}"[:400],
+            status=logger.STATUS_ERROR,
+            source=source, external_id=external_id,
+        )
+
         # Откат на базу знаний. similar_items здесь ВСЕГДА пуст — непустой
         # результат FAQ-поиска вернул бы ответ гораздо раньше, до обращения к
         # GigaChat. Раньше проверка стояла именно на similar_items, то есть
@@ -1010,6 +1028,16 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
             print(
                 f"[assistant] START_ANKETA проигнорирован: в сообщении "
                 f"кандидата нет согласия ({user_message[:60]!r})."
+            )
+            # Текст кандидата уходит в ЗАШИФРОВАННУЮ колонку: он написан
+            # человеком, а значит это персональные данные, и в открытом
+            # комментарии ему не место.
+            logger.log_event(
+                logger.EVENT_MARKER,
+                "Модель предложила анкету, но согласия в сообщении не было — отклонено.",
+                status=logger.STATUS_WARN,
+                source=source, external_id=external_id,
+                details=user_message,
             )
             consent_text = None
         else:

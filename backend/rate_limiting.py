@@ -149,6 +149,21 @@ def record_message(source: str, external_id: str, message: str,
         if entry["points"] >= block_threshold:
             entry["blocked_until"] = now + BLOCK_DURATION_MINUTES * 60
             entry["points"] = 0.0
+            blocked = True
+        else:
+            blocked = False
+
+    # Запись вне блокировки: журнал берёт свою, и вложенный захват привёл бы
+    # к лишнему ожиданию. Ключ пишем как есть — это либо номер чата Telegram,
+    # либо идентификатор сессии браузера, персональных данных в нём нет.
+    if blocked:
+        from . import logger
+        logger.log_event(
+            logger.EVENT_BLOCK,
+            f"Собеседник заблокирован за спам на {BLOCK_DURATION_MINUTES} мин.",
+            status=logger.STATUS_WARN,
+            source=source, external_id=str(external_id),
+        )
 
 
 def in_anketa(source: str, external_id: str) -> bool:

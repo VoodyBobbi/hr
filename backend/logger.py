@@ -54,6 +54,15 @@ _lock = threading.Lock()
 
 FIELDNAMES = [
     "Дата и время",
+    # Тип записи. Журнал ОДИН на всё: и разговоры с кандидатами, и
+    # системные события. Раньше события уходили только в консоль и
+    # исчезали вместе с ней — на сервере консоли под рукой нет, и о том,
+    # что уведомление HR не дошло, узнать было бы неоткуда.
+    #
+    # Один файл вместо двух выбран намеренно: его можно целиком отдать
+    # панели мониторинга, и вся картина будет в одном потоке — сообщения,
+    # сбои, блокировки, удаления. Значения см. в EVENT_* ниже.
+    "Событие",
     "Источник",
     "ID пользователя",
     "Вопрос",
@@ -71,6 +80,25 @@ FIELDNAMES = [
 # чтении. Список, а не захардкоженные имена внутри функций ниже — чтобы
 # при необходимости расширить набор шифруемых полей это было видно в одном
 # месте, а не разбросано по коду.
+# --- Типы записей в журнале ------------------------------------------------
+#
+# Латиницей и одним словом: значения читает панель мониторинга, и им лучше
+# быть устойчивыми к правкам текста.
+EVENT_DIALOG = "dialog"            # обычное сообщение кандидата
+EVENT_START = "start"              # запуск проекта
+EVENT_MODEL = "model"              # загрузка модели поиска
+EVENT_INDEX = "index"              # пересборка поискового индекса
+EVENT_GIGACHAT = "gigachat"        # сбой обращения к нейросети
+EVENT_NOTIFY = "notify"            # уведомление HR-группе
+EVENT_DELETE = "delete"            # удаление данных кандидата (152-ФЗ)
+EVENT_BLOCK = "block"              # блокировка за спам
+EVENT_MARKER = "marker"            # отклонена попытка навязать анкету
+
+# Статусы — для раскраски в панели мониторинга.
+STATUS_OK = "ok"
+STATUS_WARN = "внимание"
+STATUS_ERROR = "ошибка"
+
 _ENCRYPTED_FIELDS = {"Вопрос", "Ответ"}
 
 # Fernet-шифротекст — это ASCII-безопасный base64 сам по себе (см.
@@ -162,6 +190,7 @@ def log_interaction(source: str, external_id: str, query: str, response: str,
 
     row = {
         "Дата и время": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Событие": EVENT_DIALOG,
         "Источник": source,
         "ID пользователя": external_id,
         "Вопрос": _encrypt_field(query),
@@ -181,6 +210,51 @@ def log_interaction(source: str, external_id: str, query: str, response: str,
             if not file_exists:
                 writer.writeheader()
             writer.writerow(row)
+
+
+def log_event(event: str, comment: str, status: str = STATUS_OK,
+              source: str = "", external_id: str = "",
+              details: str = "", duration_ms=None) -> None:
+    """Пишет системное событие в ТОТ ЖЕ журнал, что и разговоры.
+
+    Что куда кладётся, и почему именно так:
+
+    - comment попадает в ОТКРЫТУЮ колонку «Комментарий». Значит панель
+      мониторинга читает события без ключа шифрования, а переписка
+      кандидатов при этом остаётся для неё закрытой. Из этого следует
+      жёсткое правило: в comment НЕЛЬЗЯ класть текст, написанный человеком.
+      Только факты о работе системы.
+    - details — для текста, который всё-таки пришёл от кандидата (например
+      сообщение, на котором сработала защита от навязанной анкеты). Он
+      уходит в зашифрованную колонку «Вопрос», как и обычные вопросы.
+
+    Ошибка записи в журнал НЕ должна ронять бота: если диск заполнен или
+    файл занят, кандидат всё равно обязан получить ответ. Поэтому всё
+    обёрнуто в try/except с выводом в консоль."""
+    try:
+        _ensure_header_up_to_date()
+        file_exists = os.path.exists(LOG_PATH)
+
+        row = {name: "" for name in FIELDNAMES}
+        row.update({
+            "Дата и время": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Событие": event,
+            "Источник": source,
+            "ID пользователя": external_id,
+            "Вопрос": _encrypt_field(details) if details else "",
+            "Время ответа (мс)": duration_ms if duration_ms is not None else "",
+            "Статус": status,
+            "Комментарий": comment,
+        })
+
+        with _lock, cross_process_lock(LOG_PATH):
+            with open(LOG_PATH, "a", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow(row)
+    except Exception as e:
+        print(f"[logger] Не удалось записать событие {event!r}: {e}")
 
 
 def purge_old_logs():

@@ -164,6 +164,19 @@ def _build_faiss_from_items(items: List[dict], index_path: str, meta_path: str):
 
     print(f"Индекс сохранён: {index_path} ({len(items)} элементов, {dim} измерений)")
 
+    # В журнал: по этой записи видно, когда правили базу знаний и сколько
+    # записей получилось. Полезно, когда бот вдруг начал отвечать иначе —
+    # первое, что надо проверить, это не менялся ли индекс.
+    try:
+        from . import logger
+        logger.log_event(
+            logger.EVENT_INDEX,
+            f"Индекс пересобран: {os.path.basename(index_path)}, "
+            f"{len(items)} элементов, {dim} измерений.",
+        )
+    except Exception as e:
+        print(f"[build_index] Не удалось записать событие пересборки: {e}")
+
 
 def _load_saved_hash(hash_path: str) -> str:
     if not os.path.exists(hash_path):

@@ -344,6 +344,22 @@ def delete_candidate(candidate_id: str) -> dict:
 
             removed_log_rows += logger.delete_logs_for_session(source, external_id)
 
+    # След в журнале. Удаление по 152-ФЗ — то самое событие, по которому
+    # потом придётся отчитываться: когда обратились и что именно стёрли.
+    # Записывается ПОСЛЕ снятия блокировки, иначе получилась бы попытка
+    # взять её повторно изнутри уже занятой секции.
+    #
+    # Текста кандидата здесь нет, только номер карточки и количества, —
+    # поэтому запись открытая и читается панелью мониторинга без ключа.
+    logger.log_event(
+        logger.EVENT_DELETE,
+        f"Удалены данные кандидата. Карточка: "
+        f"{'была и удалена' if existed_in_table else 'не найдена'}. "
+        f"Файлов переписки: {len(removed_conversations)}. "
+        f"Строк в журнале: {removed_log_rows}.",
+        external_id=str(candidate_id),
+    )
+
     return {
         "candidate_id": candidate_id,
         "removed_from_table": existed_in_table,

@@ -2,7 +2,7 @@ import asyncio
 import os
 
 from dotenv import load_dotenv
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from telegram import ReplyKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -29,6 +29,21 @@ if not TELEGRAM_BOT_TOKEN:
 # ответ ВООБЩЕ. Реально в этот предел упираются готовая карточка анкеты из
 # 29 полей (anketa.format_card_for_confirmation) и длинные ответы GigaChat.
 TELEGRAM_MESSAGE_LIMIT = 4096
+
+# Постоянная кнопка под полем ввода. Нажатие отправляет обычное текстовое
+# сообщение «Заполнить анкету», которое код распознаёт напрямую
+# (anketa.is_anketa_request) — нейросеть при этом не вызывается вообще.
+#
+# Зачем кнопка. Без неё запуск анкеты зависел от того, поставит ли модель
+# служебный маркер. В боевом тесте кандидат написал «запонляем анкетиу» с
+# опечаткой и застрял: маркер был отклонён защитой, анкета не началась.
+# Кнопка убирает этот путь целиком — человеку не нужно угадывать формулировку.
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [[anketa.ANKETA_BUTTON_TEXT]],
+    resize_keyboard=True,
+    is_persistent=True,
+    input_field_placeholder="Спросите о работе или нажмите кнопку",
+)
 
 
 def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list:
@@ -70,15 +85,17 @@ async def reply_long(update: Update, text: str, options: list | None = None) -> 
     же. Клавиатура ставится только на ПОСЛЕДНЕЕ сообщение — если ответ
     разбит на части, кнопки должны быть внизу, под вопросом.
 
-    Когда вариантов нет, клавиатура явно убирается (ReplyKeyboardRemove):
-    иначе кнопки от предыдущего вопроса остались бы висеть и сбивали с
-    толку на следующем, где нужен свободный ввод."""
+    Когда вариантов нет, ставится постоянная кнопка «Заполнить анкету».
+    Клавиатура меняется на каждом сообщении намеренно: иначе кнопки от
+    предыдущего вопроса анкеты остались бы висеть на следующем, где нужен
+    свободный ввод."""
     parts = split_message(text)
     for part in parts[:-1]:
         await update.message.reply_text(part)
 
     if options:
-        # one_time_keyboard — клавиатура прячется сразу после нажатия.
+        # Идёт анкета: под полем ввода варианты ответа на текущий вопрос.
+        # one_time_keyboard — клавиатура прячется сразу после нажатия,
         # resize_keyboard — кнопки по высоте текста, а не в пол-экрана.
         markup = ReplyKeyboardMarkup(
             [[option] for option in options],
@@ -86,7 +103,8 @@ async def reply_long(update: Update, text: str, options: list | None = None) -> 
             resize_keyboard=True,
         )
     else:
-        markup = ReplyKeyboardRemove()
+        # Обычный разговор: постоянная кнопка «Заполнить анкету».
+        markup = MAIN_KEYBOARD
 
     await update.message.reply_text(parts[-1], reply_markup=markup)
 
@@ -95,7 +113,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Здравствуйте! Я помогу разобраться с работой в ПОЛАТИ: вакансии, "
         "зарплата, вахта, обучение, документы. Спрашивайте — отвечу по делу.\n\n"
-        "Если готовы оставить заявку — так и напишите."
+        "Если готовы оставить заявку — нажмите кнопку внизу.",
+        reply_markup=MAIN_KEYBOARD,
     )
 
 

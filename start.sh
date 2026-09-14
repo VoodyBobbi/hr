@@ -4,6 +4,11 @@
 # образе python:3.11-slim, на котором собран контейнер.
 set -e
 
+# Кому доверять заголовок с адресом посетителя. Переменной окружения, а не
+# аргументом: uvicorn разбирает аргументы через click, а та разворачивает
+# звёздочку в список файлов, и сервер не стартует.
+export FORWARDED_ALLOW_IPS="${FORWARDED_ALLOW_IPS:-*}"
+
 PORT="${PORT:-8000}"
 
 # Тот же порядок действий, что и при локальном запуске через run_all.py
@@ -44,7 +49,7 @@ if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
   BOT_PID=$!
 
   uvicorn backend.app:app --host 0.0.0.0 --port "$PORT" \
-    --proxy-headers --forwarded-allow-ips "*" &
+    --proxy-headers &
   WEB_PID=$!
 
   # Останавливаем оба процесса по сигналу от Docker (docker stop),
@@ -63,5 +68,5 @@ else
 # прокси, и без флага защита от спама видит его адрес вместо адреса
 # посетителя — одинаковый для всех.
 exec uvicorn backend.app:app --host 0.0.0.0 --port "$PORT" \
-  --proxy-headers --forwarded-allow-ips "*"
+  --proxy-headers
 fi

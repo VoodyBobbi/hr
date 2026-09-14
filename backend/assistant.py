@@ -199,6 +199,14 @@ def _user_really_asked_for_anketa(user_message: str) -> bool:
         return False
     if text.endswith("?"):
         return False
+    # Корни слов, по которым согласие видно даже с опечаткой. В боевом
+    # тесте кандидат написал «запонляем анкетиу» — по целым словам это не
+    # ловится, а по корню «анкет» ловится. Ошибиться тут почти нельзя:
+    # вопрос про анкету обычно оканчивается знаком вопроса, а он отсекается
+    # выше.
+    if any(root in text for root in ("анкет", "заявк", "оформля", "оформи")):
+        return True
+
     words = set(re.findall(r"[\w-]+", text))
     return any(w in words for w in _ANKETA_INTENT)
 
@@ -532,7 +540,10 @@ def _handle_anketa_turn(source: str, external_id: str,
     if not candidate_id:
         if last_bot_message.endswith(anketa.LAW_CONSENT_TEXT):
             return _handle_law_answer(source, external_id, user_message)
-        if anketa_start_requested:
+        # Прямая просьба начать анкету — распознаётся кодом, без нейросети.
+        # Ноль токенов, мгновенно и без зависимости от того, поставит ли
+        # модель нужный маркер (в тесте она его ставила через раз).
+        if anketa_start_requested or anketa.is_anketa_request(user_message):
             return anketa.LAW_CONSENT_TEXT
         return None
 
@@ -567,7 +578,7 @@ def _handle_anketa_turn(source: str, external_id: str,
             return anketa.DELETE_CONFIRMATION_PROMPT
         if last_bot_message.endswith(anketa.LAW_CONSENT_TEXT) or stage == anketa.STAGE_LAW:
             return _handle_law_answer(source, external_id, user_message)
-        if anketa_start_requested:
+        if anketa_start_requested or anketa.is_anketa_request(user_message):
             candidates.set_stage(candidate_id, anketa.STAGE_LAW)
             return anketa.LAW_CONSENT_TEXT
         return None
@@ -593,7 +604,7 @@ def _handle_anketa_turn(source: str, external_id: str,
         # предлагал «напишите "хочу оставить заявку"», человек писал — и
         # снова упирался в эту строку. Ответа не было вообще, на экране
         # висело «Пустой ответ сервера». Выбраться было невозможно.
-        if anketa_start_requested:
+        if anketa_start_requested or anketa.is_anketa_request(user_message):
             candidates.set_stage(candidate_id, anketa.STAGE_LAW)
             return anketa.LAW_CONSENT_TEXT
         return None

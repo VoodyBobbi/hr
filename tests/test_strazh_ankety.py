@@ -27,3 +27,29 @@ def test_vopros_ne_zapuskaet_anketu(bot, text):
 ])
 def test_yavnoe_soglasie_zapuskaet_anketu(bot, text):
     assert bot.accepts_anketa(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Заполнить анкету",
+    "хочу оставить заявку",
+    "анкета",
+    "хочу работать у вас",
+])
+def test_anketa_zapuskaetsya_bez_neyroseti(bot, text):
+    """Кнопка и прямые просьбы распознаются кодом — ноль токенов.
+
+    Раньше запуск зависел от того, поставит ли модель служебный маркер. В
+    боевом тесте кандидат с опечаткой застрял и начал анкету только с
+    третьей попытки."""
+    assert bot.anketa.is_anketa_request(text)
+    reply = bot.say(text)
+    assert reply is not None and "152-ФЗ" in reply
+
+
+@pytest.mark.parametrize("text", [
+    "сколько платят?",
+    "какие вакансии",
+    "где обучение",
+])
+def test_obychnyy_vopros_ne_zapuskaet_anketu(bot, text):
+    assert not bot.anketa.is_anketa_request(text)

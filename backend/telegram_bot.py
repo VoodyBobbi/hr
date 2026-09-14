@@ -93,7 +93,9 @@ async def reply_long(update: Update, text: str, options: list | None = None) -> 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я консультант компании. Задайте вопрос — отвечу на основе базы знаний."
+        "Здравствуйте! Я помогу разобраться с работой в ПОЛАТИ: вакансии, "
+        "зарплата, вахта, обучение, документы. Спрашивайте — отвечу по делу.\n\n"
+        "Если готовы оставить заявку — так и напишите."
     )
 
 

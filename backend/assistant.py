@@ -586,6 +586,15 @@ def _handle_anketa_turn(source: str, external_id: str,
 
     # --- Анкета уже принята: дальше обычный диалог ---
     if stage == anketa.STAGE_DONE or _card_already_confirmed(candidate_id):
+        # Кроме случая, когда человек ПРЯМО СЕЙЧАС попросил начать заново.
+        #
+        # Раньше здесь был безусловный выход, и получалась ловушка: бот сам
+        # предлагал «напишите "хочу оставить заявку"», человек писал — и
+        # снова упирался в эту строку. Ответа не было вообще, на экране
+        # висело «Пустой ответ сервера». Выбраться было невозможно.
+        if anketa_start_requested:
+            candidates.set_stage(candidate_id, anketa.STAGE_LAW)
+            return anketa.LAW_CONSENT_TEXT
         return None
 
     # --- Показана карточка, ждём подтверждения или правки ---
@@ -1047,6 +1056,24 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
             )
         if consent_text:
             clean_answer = f"{clean_answer}\n\n{consent_text}" if clean_answer else consent_text
+
+    # Пустой ответ кандидату уходить не должен ни при каких обстоятельствах.
+    #
+    # Так бывает, когда модель прислала ОДИН маркер без текста, а маркер мы
+    # отклонили (см. защиту от навязанной анкеты выше). Человек видел в чате
+    # «Пустой ответ сервера» — то есть явно сломанного бота, хотя сломанного
+    # ничего не было.
+    if not clean_answer.strip():
+        clean_answer = (
+            "Расскажите, пожалуйста, что именно вас интересует по работе — "
+            "вакансии, зарплата, вахта, обучение или документы."
+        )
+        logger.log_event(
+            logger.EVENT_GIGACHAT,
+            "Модель вернула пустой ответ — отправлен запасной текст.",
+            status=logger.STATUS_WARN,
+            source=source, external_id=external_id,
+        )
 
     history.append({"role": MessagesRole.USER, "content": user_message})
     history.append({"role": MessagesRole.ASSISTANT, "content": clean_answer})

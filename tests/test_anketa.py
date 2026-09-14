@@ -80,3 +80,37 @@ def test_posle_ankety_obychnyy_dialog(bot):
         bot.say(answer)
     bot.say("да, всё верно")
     assert bot.say("а когда выезд?") is None
+
+
+def test_novoe_pole_ne_teryaetsya_v_starom_fayle(bot):
+    """Поле, добавленное в новой версии, должно дописаться в таблицу.
+
+    Из-за потери такого поля «Версия анкеты» всегда оставалась пустой,
+    любая карточка считалась устаревшей, и кандидата выбивало из анкеты
+    после первого же ответа. Заполнить её не мог никто."""
+    from backend import candidates
+    old_fields = [f for f in candidates.FIELD_ORDER if f != "Версия анкеты"]
+    candidates._save_table(old_fields, {"1": {f: "" for f in old_fields}})
+
+    assert "Версия анкеты" in candidates._load_table()[0]
+
+    bot.start_anketa()
+    assert not candidates.is_outdated(bot.card_id)
+
+
+def test_iz_zavershennoy_ankety_mozhno_nachat_zanovo(bot):
+    """Человек уже подал заявку и хочет подать ещё одну.
+
+    Раньше здесь была ловушка: бот предлагал написать «хочу оставить
+    заявку», человек писал — и не получал ничего, кроме «Пустой ответ
+    сервера». Выбраться было невозможно."""
+    from conftest import FULL_ANSWERS
+    bot.start_anketa()
+    for answer in FULL_ANSWERS:
+        bot.say(answer)
+    bot.say("да, всё верно")
+    assert bot.candidates.get_stage(bot.card_id) == bot.anketa.STAGE_DONE
+
+    reply = bot.say("хочу оставить заявку", start_requested=True)
+    assert reply is not None, "бот обязан ответить, а не молчать"
+    assert "152-ФЗ" in reply, "должен показать согласие и начать заново"

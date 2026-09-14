@@ -114,3 +114,30 @@ def test_iz_zavershennoy_ankety_mozhno_nachat_zanovo(bot):
     reply = bot.say("хочу оставить заявку", start_requested=True)
     assert reply is not None, "бот обязан ответить, а не молчать"
     assert "152-ФЗ" in reply, "должен показать согласие и начать заново"
+
+
+def test_zamok_aktivnogo_dialoga_ne_vytesnyaetsya(bot):
+    """Замок диалога, которым пользуются, не должен вылетать при переполнении.
+
+    Если вытеснять по порядку создания, замок кандидата, заполняющего
+    анкету целый час, вылетит первым. На его месте появится новый объект, и
+    два сообщения одного человека обработаются параллельно — с гонкой за
+    файл истории и перепутанным порядком реплик."""
+    import re
+    import threading
+    from collections import OrderedDict
+
+    source = open("backend/assistant.py", encoding="utf-8").read()
+    chunk = source[source.index("_MAX_SESSION_LOCKS"):source.index("def get_answer(")]
+    ns = {"threading": threading, "OrderedDict": OrderedDict, "re": re,
+          "_session_locks": OrderedDict(), "_session_locks_guard": threading.Lock()}
+    exec(compile(chunk, "locks", "exec"), ns)
+    session_lock = ns["_session_lock"]
+    limit = ns["_MAX_SESSION_LOCKS"]
+
+    active = session_lock("site", "активный")
+    for i in range(limit):
+        session_lock("site", f"случайный-{i}")
+        session_lock("site", "активный")          # им продолжают пользоваться
+
+    assert session_lock("site", "активный") is active, "активный замок подменили"

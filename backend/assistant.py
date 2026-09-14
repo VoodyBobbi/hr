@@ -3,6 +3,7 @@ import os
 import re
 import threading
 import time
+from collections import OrderedDict
 
 import numpy as np
 from dotenv import load_dotenv
@@ -714,7 +715,7 @@ def _format_candidate_progress(card: dict) -> str:
 # вообще всех кандидатов на время каждого обращения к модели. Блокировка
 # на диалог сериализует только сообщения одного человека, а это ровно то,
 # что и должно быть: два своих сообщения он всё равно ждёт по очереди.
-_session_locks: dict[str, threading.Lock] = {}
+_session_locks: "OrderedDict[str, threading.Lock]" = OrderedDict()
 _session_locks_guard = threading.Lock()
 
 
@@ -726,16 +727,33 @@ _MAX_SESSION_LOCKS = 2000
 
 
 def _session_lock(source: str, external_id: str) -> threading.Lock:
+    """Замок на конкретный диалог.
+
+    Вытесняются замки диалогов, которыми ДОЛЬШЕ ВСЕГО не пользовались, а не
+    просто самые старые по времени создания.
+
+    Разница существенная. Кандидат может заполнять анкету час — его замок
+    создан давно, но используется прямо сейчас. При вытеснении по порядку
+    создания такой замок вылетал бы первым, на его месте создавался новый
+    объект, и два сообщения одного человека могли обработаться параллельно
+    — с гонкой за файл истории. Порядок реплик в переписке мог перепутаться.
+
+    move_to_end переносит ключ в конец при каждом обращении, поэтому в
+    начале словаря всегда лежит то, что давно не трогали."""
     key = f"{source}:{external_id}"
     with _session_locks_guard:
-        if key not in _session_locks and len(_session_locks) >= _MAX_SESSION_LOCKS:
-            # Выбрасываем самые старые записи (dict в Python сохраняет
-            # порядок вставки). Замок, который кто-то прямо сейчас держит,
-            # при этом продолжает работать: объект жив, пока на него есть
-            # ссылка в работающем потоке.
-            for stale in list(_session_locks)[: _MAX_SESSION_LOCKS // 4]:
-                _session_locks.pop(stale, None)
-        return _session_locks.setdefault(key, threading.Lock())
+        existing = _session_locks.get(key)
+        if existing is not None:
+            _session_locks.move_to_end(key)
+            return existing
+
+        if len(_session_locks) >= _MAX_SESSION_LOCKS:
+            for _ in range(_MAX_SESSION_LOCKS // 4):
+                _session_locks.popitem(last=False)
+
+        lock = threading.Lock()
+        _session_locks[key] = lock
+        return lock
 
 
 def get_answer(user_message: str, source: str, external_id: str, top_k: int = 3):

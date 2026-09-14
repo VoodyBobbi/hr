@@ -43,7 +43,8 @@ if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
   python -m backend.telegram_bot &
   BOT_PID=$!
 
-  uvicorn backend.app:app --host 0.0.0.0 --port "$PORT" &
+  uvicorn backend.app:app --host 0.0.0.0 --port "$PORT" \
+    --proxy-headers --forwarded-allow-ips "*" &
   WEB_PID=$!
 
   # Останавливаем оба процесса по сигналу от Docker (docker stop),
@@ -58,5 +59,9 @@ if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
   exit "$EXIT_CODE"
 else
   echo "TELEGRAM_BOT_TOKEN не задан — поднимаю только сайт"
-  exec uvicorn backend.app:app --host 0.0.0.0 --port "$PORT"
+  # --proxy-headers: в контейнере перед сайтом почти всегда стоит обратный
+# прокси, и без флага защита от спама видит его адрес вместо адреса
+# посетителя — одинаковый для всех.
+exec uvicorn backend.app:app --host 0.0.0.0 --port "$PORT" \
+  --proxy-headers --forwarded-allow-ips "*"
 fi

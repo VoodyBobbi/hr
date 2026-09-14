@@ -53,3 +53,21 @@ def test_udali_iz_rassylki_ne_zapuskaet_udalenie(bot):
     _zapolnit_i_podtverdit(bot)
     assert bot.say("удали меня из рассылки") is None
     assert bot.card_id is not None
+
+
+def test_otricanie_ne_zapuskaet_udalenie(bot):
+    """«Только не удали мои данные» — просьба об обратном.
+
+    Раньше фраза содержала «удали мои данные» целиком, и человек получал
+    тревожное «вы уверены, это необратимо», хотя просил не трогать."""
+    for text in ("не удали мои данные",
+                 "только не удаляй мои данные",
+                 "пожалуйста не удаляйте мои данные"):
+        assert not bot.anketa.is_delete_request(text), text
+
+
+def test_obychnaya_prosba_po_prezhnemu_rabotaet(bot):
+    for text in ("удали мои данные",
+                 "хочу удалить свои данные",
+                 "удалите мою заявку"):
+        assert bot.anketa.is_delete_request(text), text

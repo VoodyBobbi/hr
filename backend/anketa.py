@@ -567,6 +567,20 @@ def is_delete_request(text: str) -> bool:
     if any(w in normalized for w in ("рассылк", "из групп", "из чат", "из списка", "подписк")):
         return False
 
+    # Отрицание перед просьбой. «Только не удали мои данные» содержит
+    # «удали мои данные» целиком, и бот показывал тревожное «вы уверены,
+    # это необратимо» человеку, который просил ровно обратного.
+    #
+    # Ищем «не» отдельным словом в пределах трёх слов перед просьбой —
+    # дальше оно почти всегда относится уже к другой части фразы.
+    for keyword in _DELETE_REQUEST_KEYWORDS:
+        position = normalized.find(keyword)
+        if position == -1:
+            continue
+        before = normalized[:position].split()[-3:]
+        if "не" in before or "нет" in before:
+            return False
+
     return any(keyword in normalized for keyword in _DELETE_REQUEST_KEYWORDS)
 
 

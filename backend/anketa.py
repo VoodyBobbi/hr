@@ -731,10 +731,24 @@ def is_progress_question(text: str) -> bool:
     графику» проглатывался как мета-вопрос, показывался процент заполнения,
     а сам ответ «Да» терялся и вопрос задавался снова."""
     normalized = text.strip().lower().strip(" ?!.,")
-    return any(
-        normalized == keyword or normalized.startswith(keyword + " ") and len(normalized) < len(keyword) + 15
-        for keyword in _PROGRESS_QUESTION_KEYWORDS
-    )
+
+    for keyword in _PROGRESS_QUESTION_KEYWORDS:
+        if normalized == keyword:
+            return True
+
+        # Фраза должна быть ВСЕМ сообщением или почти всем — не больше
+        # пяти лишних символов. Раньше запас был 15, и «что дальше по
+        # графику» проглатывалось как вопрос о прогрессе анкеты: ответ
+        # кандидата терялся, вопрос задавался снова.
+        #
+        # Скобки расставлены явно. Без них условие читалось только через
+        # приоритет операторов, и проверить его глазами было нельзя.
+        starts_with_keyword = normalized.startswith(keyword + " ")
+        almost_nothing_else = len(normalized) <= len(keyword) + 5
+        if starts_with_keyword and almost_nothing_else:
+            return True
+
+    return False
 
 
 def format_progress_answer(candidate_id: str) -> str:

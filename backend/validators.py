@@ -185,6 +185,10 @@ def _validate_dept_code(value: str, field_name: str) -> str:
     return v
 
 
+# Ответы «не знаю» для полей, где человек искренне может не знать.
+_UNKNOWN_ANSWERS = {"не знаю", "незнаю", "не помню", "хз", "не в курсе", "?"}
+
+
 def _validate_number_range(value: str, field_name: str, lo: float, hi: float, label: str) -> str:
     """Число в разумных пределах.
 
@@ -194,6 +198,15 @@ def _validate_number_range(value: str, field_name: str, lo: float, hi: float, la
     честно сообщал, что такого не бывает. Люди же пишут диапазоны и
     добавляют единицы измерения постоянно."""
     v = _require_nonempty(value, field_name, 16)
+
+    # «Не знаю» принимается для размеров одежды и обуви: многие правда не
+    # знают свой размер, а застревать на этом вопросе и бросать анкету за
+    # четыре шага до конца — куда хуже, чем пустое поле, которое HR уточнит
+    # при выдаче спецодежды.
+    if field_name in ("Размер одежды", "Размер обуви"):
+        if v.strip().lower().strip(" .!?") in _UNKNOWN_ANSWERS:
+            return "не знаю"
+
     match = re.search(r"\d+(?:[.,]\d+)?", v)
     if not match:
         raise FieldValidationError(field_name, f"{label} должен быть числом.")

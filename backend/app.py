@@ -12,7 +12,7 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from .assistant import get_answer
+from .assistant import get_answer, get_history
 from . import anketa
 from . import candidates
 from . import rate_limiting
@@ -274,6 +274,10 @@ class ChatResponse(BaseModel):
     context: list
     session_id: str
     options: list[str] = []
+    # Идёт ли сейчас заполнение анкеты. Страница по этому признаку прячет
+    # подсказки «Какие есть вакансии?» — во время анкеты они мешают: их
+    # нажатие уходило бы в поле как ответ.
+    in_anketa: bool = False
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -346,9 +350,72 @@ def chat(request: Request, response: Response, body: ChatRequest,
         context=list(similar_items),
         session_id=session_id,
         options=options,
+        in_anketa=rate_limiting.in_anketa("site", session_id),
     )
 
 
+@app.get("/history")
+def history(request: Request,
+            session_id: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME)):
+    """Переписка текущей сессии — страница подтягивает её при открытии.
+
+    Без этого получалось расхождение: сервер диалог помнит, а страница
+    показывает чистое приветствие. Человек считал, что начинает заново, и
+    писал «привет» — а оно уходило в поле анкеты, на котором он остановился.
+
+    Своей сессии нет — возвращается пустой список, это нормальный случай
+    для первого захода."""
+    if not session_id:
+        return {"messages": [], "options": [], "in_anketa": False}
+
+    candidate_id = candidates.find_candidate("site", session_id)
+    return {
+        "messages": get_history("site", session_id),
+        "options": anketa.pending_field_options(candidate_id),
+        "in_anketa": rate_limiting.in_anketa("site", session_id),
+    }
+
+
 @app.get("/health")
-def health():
-    return {"status": "ok"}
+def health(response: Response):
+    """Проверка, действительно ли сервис способен работать.
+
+    По этому адресу хостинг решает, жив контейнер или перезапускать. Раньше
+    здесь всегда возвращалось «ок» — без единой проверки. Индекс не
+    загрузился, ключ шифрования с опечаткой: бот отвечает всем ошибками, а
+    панель хостинга зелёная, и никто ничего не чинит. Узнавали бы об этом
+    от эйчара через три дня.
+
+    Проверяются две вещи, без которых бот бесполезен:
+
+    - ключ шифрования рабочий (иначе не сохранить ни одной анкеты);
+    - поисковый индекс загружен (иначе бот не знает ничего о компании).
+
+    GigaChat СОЗНАТЕЛЬНО не проверяется. Это внешний сервис, и его
+    пятиминутный сбой не повод перезапускать контейнер — бот в это время
+    продолжает отвечать готовыми ответами и вести анкету. Плюс каждая
+    проверка живости дёргала бы платный API.
+
+    Код 503 при поломке обязателен: хостинги смотрят именно на код ответа,
+    а не на текст внутри."""
+    checks = {}
+
+    try:
+        from .crypto_utils import decrypt_bytes, encrypt_bytes
+        checks["encryption"] = decrypt_bytes(encrypt_bytes(b"check")) == b"check"
+    except Exception as e:
+        checks["encryption"] = False
+        checks["encryption_error"] = f"{type(e).__name__}: {e}"[:200]
+
+    try:
+        from . import assistant
+        checks["index"] = assistant._state.get("index") is not None
+    except Exception as e:
+        checks["index"] = False
+        checks["index_error"] = f"{type(e).__name__}: {e}"[:200]
+
+    healthy = checks.get("encryption") and checks.get("index")
+    if not healthy:
+        response.status_code = 503
+
+    return {"status": "ok" if healthy else "неисправен", **checks}

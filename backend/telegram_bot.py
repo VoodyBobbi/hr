@@ -242,39 +242,86 @@ async def handle_non_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _same_chat(actual, expected) -> bool:
+    """Один ли это чат, с поправкой на разные формы записи id.
+
+    Telegram сообщает id супергруппы и канала с приставкой -100, а в .env
+    его нередко вписывают без неё (или наоборот). Строки при этом разные, а
+    чат один и тот же. Сравниваем по значащим цифрам."""
+    def normalize(value):
+        digits = "".join(ch for ch in str(value) if ch.isdigit())
+        return digits[3:] if digits.startswith("100") and len(digits) > 10 else digits
+
+    return bool(actual) and bool(expected) and normalize(actual) == normalize(expected)
+
+
 async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Нажатие кнопки «Показать все данные кандидата» в HR-группе.
 
-    Проверка чата обязательна. callback_data приходит от Telegram и содержит
-    id кандидата — без проверки любой человек, узнавший формат строки, мог бы
-    вытащить чужую анкету из личной переписки с ботом. Отвечаем полной
-    карточкой только если кнопку нажали именно в той группе, которая указана
-    в TELEGRAM_HR_GROUP_CHAT_ID."""
+    Проверка чата обязательна: callback_data приходит от Telegram и содержит
+    номер карточки. Без проверки любой, кто узнал формат строки, вытащил бы
+    чужую анкету из личной переписки с ботом.
+
+    Всё обёрнуто в try: раньше при любой неожиданности обработчик падал, а
+    python-telegram-bot писал «No error handlers are registered» в консоль.
+    Со стороны HR это выглядело так, будто кнопка просто перестала
+    работать."""
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
 
-    _, hr_chat_id = notifications._settings()
-    if not hr_chat_id or str(query.message.chat.id) != str(hr_chat_id):
+        chat_id = query.message.chat.id if query.message else None
+        _, hr_chat_id = notifications._settings()
+
+        if not _same_chat(chat_id, hr_chat_id):
+            # Раньше кнопка здесь МОЛЧА снималась — со стороны это и
+            # выглядело как «кнопка стала неактивной». Теперь говорим, что
+            # произошло, и пишем в журнал оба значения, чтобы было видно,
+            # какое именно расхождение.
+            print(
+                f"[telegram] Кнопку нажали в чате {chat_id}, а в .env указан "
+                f"{hr_chat_id}. Данные не показаны."
+            )
+            logger.log_event(
+                logger.EVENT_NOTIFY,
+                f"Кнопка нажата в чате {chat_id}, а TELEGRAM_HR_GROUP_CHAT_ID "
+                f"= {hr_chat_id}. Данные не показаны.",
+                status=logger.STATUS_ERROR,
+            )
+            await query.message.reply_text(
+                "Не могу показать данные: этот чат не совпадает с тем, что "
+                "указан в настройках бота. Проверьте TELEGRAM_HR_GROUP_CHAT_ID "
+                "командой: python -m scripts.check_telegram"
+            )
+            return
+
+        data = query.data or ""
+        if not data.startswith("card:"):
+            return
+        candidate_id = data.split(":", 1)[1]
+
+        card = await asyncio.to_thread(candidates.get_card, candidate_id)
+        if not card:
+            await query.message.reply_text(
+                "Карточка не найдена — возможно, кандидат удалил свои данные."
+            )
+            return
+
+        text = notifications.format_full_card(card)
+        for part in split_message(text):
+            await query.message.reply_text(part, parse_mode="HTML")
+
+        # Кнопку убираем: данные показаны, повторные нажатия плодили бы
+        # копии одной и той же анкеты в ленте.
         await query.edit_message_reply_markup(reply_markup=None)
-        return
 
-    data = query.data or ""
-    if not data.startswith("card:"):
-        return
-    candidate_id = data.split(":", 1)[1]
-
-    card = await asyncio.to_thread(candidates.get_card, candidate_id)
-    if not card:
-        await query.message.reply_text("Карточка не найдена — возможно, кандидат удалил свои данные.")
-        return
-
-    text = notifications.format_full_card(card)
-    for part in split_message(text):
-        await query.message.reply_text(part, parse_mode="HTML")
-
-    # Кнопку убираем: данные уже показаны, повторные нажатия только
-    # засоряли бы группу копиями одной и той же анкеты.
-    await query.edit_message_reply_markup(reply_markup=None)
+    except Exception as e:
+        print(f"[telegram] Ошибка при показе карточки: {type(e).__name__}: {e}")
+        logger.log_event(
+            logger.EVENT_NOTIFY,
+            f"Не удалось показать карточку по кнопке: {type(e).__name__}: {e}"[:300],
+            status=logger.STATUS_ERROR,
+        )
 
 
 def main():

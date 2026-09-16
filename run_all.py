@@ -68,8 +68,40 @@ def _check_encryption_key():
     from dotenv import load_dotenv
     load_dotenv()
 
-    if os.environ.get("ENCRYPTION_KEY", "").strip():
-        return
+    key = os.environ.get("ENCRYPTION_KEY", "").strip()
+
+    if key:
+        # Проверяем, что ключ РАБОЧИЙ, а не просто непустой.
+        #
+        # Раньше проверялось только наличие строки. Опечатка при переносе
+        # .env на сервер — потерянный символ, лишний пробел — проходила
+        # насквозь: запуск успешный, /health отвечает «ок», а первый же
+        # кандидат получает ошибку сервера вместо ответа.
+        #
+        # Хуже всего, что симптом не указывает на причину: в трассировке
+        # видна ошибка записи журнала, а настоящая беда — опечатка в .env.
+        # Искать будут не там.
+        try:
+            from backend.crypto_utils import decrypt_bytes, encrypt_bytes
+            if decrypt_bytes(encrypt_bytes(b"check")) != b"check":
+                raise ValueError("шифрование и расшифровка дали разный результат")
+            return
+        except Exception as e:
+            print()
+            print("=" * 70)
+            print("ОШИБКА: ключ шифрования (ENCRYPTION_KEY) в .env неверный.")
+            print()
+            print(f"Причина: {e}")
+            print()
+            print("Ключ есть, но им не получается зашифровать данные. Скорее")
+            print("всего при копировании в .env потерялся или добавился символ.")
+            print()
+            print("Если это ключ от уже собранных анкет — восстановите его")
+            print("точное значение, иначе прочитать их будет невозможно.")
+            print("Если анкет ещё нет — очистите строку ENCRYPTION_KEY в .env,")
+            print("и при следующем запуске программа создаст новый ключ.")
+            print("=" * 70)
+            sys.exit(1)
 
     print()
     print("=" * 70)

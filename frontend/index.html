@@ -7,7 +7,7 @@
      страницы, а не накрывай её сверху. Без этого поле ввода уезжало под
      клавиатуру, а вместе с ним разъезжалась вся раскладка. -->
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-<!-- layout-v7 -->
+<!-- layout-v8 -->
 <title>Работа в ПОЛАТИ — вахта на промышленных объектах</title>
 <style>
 /* ---------------------------------------------------------------------
@@ -420,7 +420,7 @@ h1{
 </div>
 
 <script>
-console.log("ПОЛАТИ · вёрстка layout-v7");
+console.log("ПОЛАТИ · вёрстка layout-v8");
 
 const API_URL = "/chat";
 
@@ -454,11 +454,40 @@ function addMessage(body, who){
   return el;
 }
 
-addMessage(
+const GREETING =
   "Здравствуйте! Я помогу разобраться с работой в ПОЛАТИ: вакансии, " +
-  "зарплата, вахта, обучение, документы. Спрашивайте — отвечу по делу.",
-  "bot"
-);
+  "зарплата, вахта, обучение, документы. Спрашивайте — отвечу по делу.";
+
+// При открытии страницы подтягиваем переписку с сервера.
+//
+// Без этого сервер диалог помнил, а страница — нет. Человек сворачивал
+// вкладку, открывал заново, видел чистое приветствие и считал, что
+// разговор начался с нуля. А на сервере он всё ещё стоял посреди анкеты,
+// и его «привет» уходило прямо в поле «Фамилия» — в уведомлении HR так и
+// появился кандидат по фамилии «привет».
+async function restoreHistory(){
+  try {
+    const response = await fetch("/history", { credentials: "include" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const data = await response.json();
+
+    if (Array.isArray(data.messages) && data.messages.length > 0) {
+      data.messages.forEach(function(m){
+        addMessage(m.text, m.role === "user" ? "me" : "bot");
+      });
+      // Разговор продолжается — подсказки о чём спросить уже не нужны.
+      if (chips) chips.remove();
+      showOptions(data.options);
+      setAnketaMode(data.in_anketa);
+      return;
+    }
+  } catch (err) {
+    // Историю подтянуть не вышло — не беда, покажем обычное приветствие.
+  }
+  addMessage(GREETING, "bot");
+}
+
+restoreHistory();
 
 // Кнопки с вариантами ответа на текущий вопрос анкеты. Сервер присылает их
 // в поле options; пустой список убирает блок и оставляет обычный ввод.
@@ -482,6 +511,14 @@ function showOptions(list){
   });
   optionsWrap.hidden = false;
   scrollToBottom();
+}
+
+// Подсказки «Какие есть вакансии?» нужны только вне анкеты. Во время
+// заполнения они мешают: нажатие уходит в поле как ответ, а человек не
+// понимает, почему бот отвечает «не понял дату».
+function setAnketaMode(active){
+  if (!chips) return;
+  chips.style.display = active ? "none" : "";
 }
 
 let busy = false;
@@ -514,6 +551,7 @@ async function ask(question){
     waiting.remove();
     addMessage(data.answer || "Пустой ответ сервера. Попробуйте ещё раз.", "bot");
     showOptions(data.options);
+    setAnketaMode(data.in_anketa);
   } catch (err) {
     waiting.remove();
     addMessage(

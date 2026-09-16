@@ -651,8 +651,9 @@ def _handle_anketa_turn(source: str, external_id: str,
             )
 
         return (
-            "Если нужно что-то исправить — назовите поле и новое значение, "
-            "например: «Телефон 89991234567» или «Рост 180». "
+            "Если нужно что-то исправить — напишите поле и новое значение. "
+            "Можно скопировать строку из анкеты выше и вставить с "
+            "исправленным значением, например: «Телефон 89991234567».\n\n"
             "Если всё верно — напишите «да»."
         )
 
@@ -1141,3 +1142,30 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
     )
 
     return clean_answer, similar_items
+
+
+def get_history(source: str, external_id: str, limit: int = 40) -> list:
+    """Переписка для показа на странице при её открытии.
+
+    Нужна потому, что сервер помнил диалог, а страница — нет. Человек
+    сворачивал вкладку, открывал заново, видел свежее приветствие и думал,
+    что разговор начался с нуля. А на сервере он всё ещё стоял посреди
+    анкеты — и его «привет» уходило прямо в поле «Фамилия». В уведомлении
+    HR так и появился кандидат с фамилией «привет».
+
+    Возвращает список вида [{"role": "user"|"assistant", "text": ...}] —
+    уже расшифрованный и без служебных полей."""
+    with _history_lock:
+        history = _load_history(source, external_id)
+
+    result = []
+    for message in history[-limit:]:
+        role = str(message.get("role", ""))
+        text = str(message.get("content", "")).strip()
+        if not text:
+            continue
+        result.append({
+            "role": "user" if "user" in role.lower() else "assistant",
+            "text": text,
+        })
+    return result

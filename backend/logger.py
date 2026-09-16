@@ -186,6 +186,33 @@ def log_interaction(source: str, external_id: str, query: str, response: str,
                      completion_tokens: Optional[int] = None,
                      total_tokens: Optional[int] = None,
                      cached_tokens: Optional[int] = None):
+    """Записывает разговор с кандидатом в журнал.
+
+    Сбой записи НЕ должен отбирать у кандидата ответ. Раньше перехвата не
+    было, и при неверном ключе шифрования исключение уходило наверх прямо
+    в обработку сообщения: человек получал ошибку сервера вместо ответа.
+    Причём в трассировке была видна ошибка журнала, а настоящая беда —
+    опечатка в .env, и искали бы не там.
+
+    Теперь при старте ключ проверяется по-настоящему (run_all.py), так что
+    до этого дойти не должно. Но перехват здесь всё равно нужен: место на
+    диске может кончиться, файл может оказаться занят. Потерянная строка
+    журнала — неприятность, потерянный ответ кандидату — потерянный
+    кандидат."""
+    try:
+        _log_interaction_unsafe(
+            source, external_id, query, response, response_time_ms,
+            status, comment, prompt_tokens, completion_tokens,
+            total_tokens, cached_tokens,
+        )
+    except Exception as e:
+        print(f"[logger] Не удалось записать разговор в журнал: {type(e).__name__}: {e}")
+
+
+def _log_interaction_unsafe(source, external_id, query, response,
+                            response_time_ms, status, comment,
+                            prompt_tokens, completion_tokens,
+                            total_tokens, cached_tokens):
     file_exists = os.path.exists(LOG_PATH)
 
     row = {

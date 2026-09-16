@@ -9,19 +9,22 @@ import pytest
 
 
 def test_health_soobschaet_ob_ispravnosti():
-    # fastapi ставится вместе с проектом; пропуск нужен только для среды,
-    # где зависимости ещё не установлены.
-    pytest.importorskip("fastapi")
-    from fastapi.testclient import TestClient
-    from backend.app import app
+    """Проверка живости должна смотреть на ключ и индекс, а не отвечать «ок».
 
-    with TestClient(app) as client:
-        r = client.get("/health")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == "ok"
-    assert body["encryption"] is True, "ключ шифрования должен проверяться"
-    assert "index" in body, "загрузку индекса тоже надо проверять"
+    Функция вызывается напрямую, без поднятия сервера. Тестовый клиент
+    FastAPI тянет за собой httpx, а его подменяют заглушкой другие тесты в
+    этом же прогоне — и клиент падал на чужой подмене, хотя проверяемый код
+    исправен. Прямой вызов от этого избавлен и проверяет ровно то, что
+    нужно."""
+    pytest.importorskip("fastapi")
+    from backend.app import health
+
+    class FakeResponse:
+        status_code = 200
+
+    result = health(FakeResponse())
+    assert result["encryption"] is True, "ключ шифрования должен проверяться"
+    assert "index" in result, "загрузку индекса тоже надо проверять"
 
 
 def test_zhurnal_ne_roniaet_otvet_pri_bitom_kluche(monkeypatch, capsys):

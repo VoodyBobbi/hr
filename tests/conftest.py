@@ -9,6 +9,7 @@
 import os
 import re
 import sys
+import time
 import types
 
 import numpy as np
@@ -92,6 +93,17 @@ def bot():
     guard = source_code[source_code.index("_ANKETA_INTENT = ("):
                         source_code.index("def _format_kb_context(")]
     exec(compile(guard, "assistant_guard", "exec"), namespace)
+
+    # Память о шаге согласия по 152-ФЗ живёт в модуле, а не в карточке —
+    # до согласия карточки ещё нет. Подтягиваем этот блок отдельно, иначе
+    # _handle_anketa_turn не найдёт вспомогательных функций.
+    import threading
+    from collections import OrderedDict
+    namespace.update({"threading": threading, "OrderedDict": OrderedDict,
+                      "time": time, "_session_locks_guard": threading.Lock()})
+    consent = source_code[source_code.index("_awaiting_consent:"):
+                          source_code.index("_session_locks: ")]
+    exec(compile(consent, "assistant_consent", "exec"), namespace)
 
     class Bot:
         def __init__(self):

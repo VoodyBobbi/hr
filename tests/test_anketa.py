@@ -14,18 +14,30 @@ def test_soglasie_zavodit_kartochku(bot):
     assert bot.card_id is not None
 
 
-def test_neponyatnyy_otvet_na_soglasie_pereprashivaet(bot):
+def test_vopros_na_shage_soglasiya_uhodit_v_obychnyy_dialog(bot):
+    """Вопрос вместо «да» или «нет» должен получить ответ, а не повтор
+    согласия. Раньше человек спрашивал «зарплата?» и получал юридический
+    текст целиком — и так на каждый вопрос."""
     consent = bot.say("хочу оставить заявку", start_requested=True)
     bot.last = "Отлично.\n\n" + consent
-    assert "Не понял" in bot.say("а долго это?")
+
+    assert bot.say("а сколько платят?") is None, "вопрос должен уйти в GigaChat"
     assert bot.card_id is None, "карточка не должна заводиться до согласия"
+
+
+def test_neponyatnyy_otvet_pereprashivaet(bot):
+    """А вот бессмысленный ответ, который не вопрос, — переспрашиваем."""
+    consent = bot.say("хочу оставить заявку", start_requested=True)
+    bot.last = "Отлично.\n\n" + consent
+    assert "Не понял" in bot.say("хм")
+    assert bot.card_id is None
 
 
 def test_net_davayte_pozzhe_eto_otkaz(bot):
     """152-ФЗ: «Нет, давайте позже» — отказ, а не согласие."""
     consent = bot.say("хочу оставить заявку", start_requested=True)
     bot.last = "Отлично.\n\n" + consent
-    assert "не будем" in bot.say("Нет, давайте позже")
+    assert "отложим" in bot.say("Нет, давайте позже")
     assert bot.card_id is None
 
 
@@ -141,3 +153,41 @@ def test_zamok_aktivnogo_dialoga_ne_vytesnyaetsya(bot):
         session_lock("site", "активный")          # им продолжают пользоваться
 
     assert session_lock("site", "активный") is active, "активный замок подменили"
+
+
+def test_vopros_posredi_ankety_predlagaet_pauzu(bot):
+    """Вопрос вместо ответа на пункт — предложить выбор, а не молча
+    повторять вопрос анкеты. Раньше выглядело так, будто вопрос человека
+    проигнорировали."""
+    bot.start_anketa()
+    bot.say("Иванов")
+
+    reply = bot.say("а сколько платят?")
+    assert "вопрос, а не ответ" in reply
+    assert bot.candidates.get_stage(bot.card_id) == bot.anketa.STAGE_PAUSE_ASK
+
+
+def test_pauza_i_vozvrat_k_ankete(bot):
+    bot.start_anketa()
+    bot.say("Иванов")
+    bot.say("а сколько платят?")
+
+    assert "отложил" in bot.say("да")
+    assert bot.candidates.get_stage(bot.card_id) == bot.anketa.STAGE_PAUSED
+
+    # На паузе вопросы уходят в обычный диалог.
+    assert bot.say("а что по вахте?") is None
+
+    reply = bot.say("продолжить")
+    assert "Возвращаемся к анкете" in reply
+    assert bot.candidates.get_stage(bot.card_id) == bot.anketa.STAGE_FIELDS
+
+
+def test_otkaz_ot_pauzy_prodolzhaet_anketu(bot):
+    bot.start_anketa()
+    bot.say("Иванов")
+    bot.say("а сколько платят?")
+
+    reply = bot.say("нет")
+    assert "Как вас зовут" in reply, "должен повторить текущий вопрос"
+    assert bot.candidates.get_stage(bot.card_id) == bot.anketa.STAGE_FIELDS

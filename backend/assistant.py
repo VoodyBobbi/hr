@@ -538,12 +538,14 @@ def _handle_anketa_turn(source: str, external_id: str,
 
     # --- Карточки ещё нет: согласие 152-ФЗ ---
     if not candidate_id:
-        if last_bot_message.endswith(anketa.LAW_CONSENT_TEXT):
+        if (last_bot_message.endswith(anketa.LAW_CONSENT_TEXT)
+                or is_awaiting_consent(source, external_id)):
             return _handle_law_answer(source, external_id, user_message)
         # Прямая просьба начать анкету — распознаётся кодом, без нейросети.
         # Ноль токенов, мгновенно и без зависимости от того, поставит ли
         # модель нужный маркер (в тесте она его ставила через раз).
         if anketa_start_requested or anketa.is_anketa_request(user_message):
+            _mark_awaiting_consent(source, external_id)
             return anketa.LAW_CONSENT_TEXT
         return None
 
@@ -657,6 +659,34 @@ def _handle_anketa_turn(source: str, external_id: str,
             "Если всё верно — напишите «да»."
         )
 
+    # --- Спросили, приостановить ли анкету ---
+    if stage == anketa.STAGE_PAUSE_ASK:
+        if anketa.is_law_accepted(user_message):
+            candidates.set_stage(candidate_id, anketa.STAGE_PAUSED)
+            return (
+                "Хорошо, анкету отложил. Спрашивайте что угодно о работе.\n\n"
+                + anketa.PAUSED_REMINDER
+            )
+        if anketa.is_law_declined(user_message):
+            candidates.set_stage(candidate_id, anketa.STAGE_FIELDS)
+            step = anketa.get_next_step(candidate_id)
+            return step[1] if step else anketa.format_card_for_confirmation(candidate_id)
+        # Ответ не разобран — повторяем выбор, а не гадаем.
+        return anketa.PAUSE_ASK_TEXT
+
+    # --- Анкета на паузе: обычный диалог, пока не попросят вернуться ---
+    if stage == anketa.STAGE_PAUSED:
+        if anketa.is_resume_request(user_message):
+            candidates.set_stage(candidate_id, anketa.STAGE_FIELDS)
+            step = anketa.get_next_step(candidate_id)
+            if step is None:
+                candidates.set_stage(candidate_id, anketa.STAGE_CONFIRM)
+                return anketa.format_card_for_confirmation(candidate_id)
+            return f"Возвращаемся к анкете.\n\n{step[1]}"
+        # Вопрос уходит в обычный диалог. Напоминание припишется в
+        # get_answer, чтобы человек не думал, что анкета потерялась.
+        return None
+
     # --- Основной сбор полей ---
     if anketa.is_progress_question(user_message):
         return anketa.format_progress_answer(candidate_id)
@@ -680,6 +710,14 @@ def _handle_anketa_turn(source: str, external_id: str,
         # анкеты» был бы съеден как вопрос и потерян.
         if not ok and anketa.is_anketa_status_question(user_message):
             return anketa.format_status(candidate_id, anketa.STAGE_FIELDS)
+
+        # Человек задал вопрос вместо ответа на пункт. Раньше бот просто
+        # повторял вопрос с текстом ошибки, и выглядело так, будто его
+        # вопрос проигнорировали. Теперь предлагаем выбор явно.
+        if not ok and anketa.looks_like_question(user_message):
+            candidates.set_stage(candidate_id, anketa.STAGE_PAUSE_ASK)
+            return anketa.PAUSE_ASK_TEXT
+
         return message
 
     candidates.set_stage(candidate_id, anketa.STAGE_CONFIRM)
@@ -694,13 +732,26 @@ def _handle_law_answer(source: str, external_id: str, user_message: str):
     здесь, в момент фактического согласия, — отказавшийся не оставляет после
     себя строки в таблице персональных данных."""
     if anketa.is_law_declined(user_message):
+        _clear_awaiting_consent(source, external_id)
         return (
-            "Хорошо, анкету заполнять не будем. Если у вас есть вопросы "
-            "о вакансиях — с радостью отвечу."
+            "Хорошо, анкету отложим. Спрашивайте о работе — расскажу про "
+            "вакансии, зарплату, вахту, обучение и документы. Когда "
+            "захотите оставить заявку, просто скажите об этом."
         )
+
     if not anketa.is_law_accepted(user_message):
+        # Человек задал вопрос вместо «да» или «нет». Пропускаем его в
+        # обычный диалог, а шаг согласия оставляем в силе — к ответу
+        # припишется короткое напоминание (см. get_answer).
+        #
+        # Раньше здесь безусловно возвращался повтор согласия: на вопрос
+        # «зарплата?» человек получал юридический текст вместо ответа, и
+        # так по кругу — выйти было нельзя.
+        if anketa.looks_like_question(user_message):
+            return None
         return anketa.LAW_CONSENT_RETRY
 
+    _clear_awaiting_consent(source, external_id)
     candidate_id = candidates.get_or_create_candidate(source, external_id)
     candidates.mark_law_acknowledged(candidate_id)
     candidates.set_stage(candidate_id, anketa.STAGE_FIELDS)
@@ -746,6 +797,38 @@ def _card_already_confirmed(candidate_id: str) -> bool:
 # вообще всех кандидатов на время каждого обращения к модели. Блокировка
 # на диалог сериализует только сообщения одного человека, а это ровно то,
 # что и должно быть: два своих сообщения он всё равно ждёт по очереди.
+# Кто сейчас стоит на шаге согласия по 152-ФЗ.
+#
+# До согласия карточки кандидата НЕТ — мы её намеренно не создаём, пока
+# человек не согласился. Значит и этап хранить негде: в карточке нельзя,
+# а по тексту предыдущего сообщения бота — ненадёжно, потому что между
+# показом согласия и ответом человек может задать вопрос, и последним
+# сообщением бота станет ответ на него.
+#
+# Здесь только пара «канал + номер диалога», персональных данных нет.
+# Потеря при перезапуске безобидна: человек просто нажмёт кнопку снова.
+_awaiting_consent: "OrderedDict[str, float]" = OrderedDict()
+_MAX_AWAITING = 2000
+
+
+def _mark_awaiting_consent(source: str, external_id: str) -> None:
+    key = f"{source}:{external_id}"
+    with _session_locks_guard:
+        if len(_awaiting_consent) >= _MAX_AWAITING:
+            for _ in range(_MAX_AWAITING // 4):
+                _awaiting_consent.popitem(last=False)
+        _awaiting_consent[key] = time.time()
+
+
+def is_awaiting_consent(source: str, external_id: str) -> bool:
+    return f"{source}:{external_id}" in _awaiting_consent
+
+
+def _clear_awaiting_consent(source: str, external_id: str) -> None:
+    with _session_locks_guard:
+        _awaiting_consent.pop(f"{source}:{external_id}", None)
+
+
 _session_locks: "OrderedDict[str, threading.Lock]" = OrderedDict()
 _session_locks_guard = threading.Lock()
 
@@ -1118,6 +1201,15 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
             status=logger.STATUS_WARN,
             source=source, external_id=external_id,
         )
+
+    # Человек стоит на шаге согласия и задал вопрос. Ответили — и напомнили
+    # одной строкой, что анкета ждёт. Полный юридический текст не повторяем:
+    # он уже был показан, а второй раз читать его никто не станет.
+    if is_awaiting_consent(source, external_id):
+        clean_answer = f"{clean_answer}\n\n{anketa.LAW_CONSENT_REMINDER}"
+    elif (candidate_id
+            and candidates.get_stage(candidate_id) == anketa.STAGE_PAUSED):
+        clean_answer = f"{clean_answer}\n\n{anketa.PAUSED_REMINDER}"
 
     history.append({"role": MessagesRole.USER, "content": user_message})
     history.append({"role": MessagesRole.ASSISTANT, "content": clean_answer})

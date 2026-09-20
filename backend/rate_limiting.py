@@ -185,5 +185,6 @@ def in_anketa(source: str, external_id: str) -> bool:
     if not candidate_id:
         return False
     return candidates.get_stage(candidate_id) in (
-        anketa.STAGE_LAW, anketa.STAGE_FIELDS, anketa.STAGE_CONFIRM, anketa.STAGE_DELETE,
+        anketa.STAGE_LAW, anketa.STAGE_FIELDS, anketa.STAGE_CONFIRM,
+        anketa.STAGE_DELETE, anketa.STAGE_PAUSE_ASK,
     )

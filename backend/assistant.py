@@ -698,6 +698,18 @@ def _handle_anketa_turn(source: str, external_id: str,
         return anketa.format_status(candidate_id, anketa.STAGE_FIELDS)
 
     next_step = anketa.get_next_step(candidate_id)
+
+    # Сообщение с вопросительным знаком — это вопрос, а не ответ на пункт.
+    # Проверяется ДО сохранения поля.
+    #
+    # Иначе вопрос попадал в анкету как ответ: у полей со свободным текстом
+    # («Кем выдан», адреса, опыт работы) проверки формата нет, и «а сколько
+    # платят?» сохранялось в поле «Кем выдан» паспорта. Настоящий ответ на
+    # пункт анкеты знаком вопроса не заканчивается.
+    if next_step and user_message.strip().endswith("?"):
+        candidates.set_stage(candidate_id, anketa.STAGE_PAUSE_ASK)
+        return anketa.PAUSE_ASK_TEXT
+
     if next_step:
         field, _ = next_step
         ok, message = anketa.process_answer(candidate_id, field, user_message)
@@ -929,8 +941,21 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
         if anketa_reply == anketa.DELETE_DONE_MESSAGE:
             history = []
         else:
-            history.append({"role": MessagesRole.USER, "content": user_message})
-            history.append({"role": MessagesRole.ASSISTANT, "content": anketa_reply})
+            # Метка "anketa" — чтобы эти реплики НЕ уходили в нейросеть.
+            #
+            # В анкетных ходах лежат паспорт, СНИЛС, ИНН, адреса, судимость
+            # и здоровье. Раньше они писались в общую историю, а та целиком
+            # уходила в GigaChat при следующем же обычном вопросе. Два пути
+            # утечки: человек ставил анкету на паузу посреди паспортных
+            # полей и спрашивал о зарплате — в модель уезжали серия и номер;
+            # человек подтверждал карточку и спрашивал о выезде — в модель
+            # уезжала вся карточка из 29 полей, потому что последним
+            # сообщением бота была именно она.
+            #
+            # В файле истории реплики остаются: по ним страница
+            # восстанавливает переписку для самого кандидата.
+            history.append({"role": MessagesRole.USER, "content": user_message, "anketa": True})
+            history.append({"role": MessagesRole.ASSISTANT, "content": anketa_reply, "anketa": True})
         # Обрезка истории, как и в остальных ветках ниже. Без неё файл
         # истории рос без ограничения все 29 шагов анкеты и дальше.
         history = history[-MAX_HISTORY_MESSAGES:]
@@ -1009,7 +1034,12 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
 
     messages = [Messages(role=MessagesRole.SYSTEM, content=current_system_prompt)]
 
+    # Анкетные ходы в нейросеть НЕ передаются — там персональные данные.
+    # См. комментарий у метки "anketa" выше. Нейросети они и не нужны:
+    # про анкету она по правилам ничего не знает и не говорит.
     for turn in history:
+        if turn.get("anketa"):
+            continue
         messages.append(Messages(role=turn["role"], content=turn["content"]))
 
     messages.append(
@@ -1181,7 +1211,17 @@ def _get_answer(user_message: str, source: str, external_id: str, top_k: int = 3
                 source, external_id, user_message, last_bot_message,
                 anketa_start_requested=True,
             )
-        if consent_text:
+        if consent_text == anketa.LAW_CONSENT_TEXT:
+            # Уведомление о сборе данных показывается ОТДЕЛЬНЫМ сообщением,
+            # без приклеенной впереди фразы модели вроде «Отлично, тогда
+            # начнём».
+            #
+            # Так человек видит его как отдельный документ, который надо
+            # прочитать, а не как хвост обычного ответа. Это же требует и
+            # закон: согласие оформляется отдельно от иной информации
+            # (ч. 1 ст. 9 152-ФЗ в редакции с 01.09.2025).
+            clean_answer = consent_text
+        elif consent_text:
             clean_answer = f"{clean_answer}\n\n{consent_text}" if clean_answer else consent_text
 
     # Пустой ответ кандидату уходить не должен ни при каких обстоятельствах.
